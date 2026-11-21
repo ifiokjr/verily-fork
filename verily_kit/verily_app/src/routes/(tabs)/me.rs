@@ -51,6 +51,8 @@ pub fn Page(navigation: &Navigation) -> Element {
 	let payouts = use_rpc_query(|| ListMyPayouts {});
 	let wallet = use_rpc_query(|| WalletStatus {});
 	let review = navigation.clone();
+	let appeals = navigation.clone();
+	let apps = navigation.clone();
 	let settings = navigation.clone();
 	view! {
 		<chrome::Page>
@@ -107,6 +109,16 @@ pub fn Page(navigation: &Navigation) -> Element {
 					label=l10n.me_link_review()
 					on_press=move || review.navigate(Route::Reviews)
 					seed=401
+				/>
+				<chrome::Quiet
+					label=l10n.me_link_appeals()
+					on_press=move || appeals.navigate(Route::Appeals)
+					seed=402
+				/>
+				<chrome::Quiet
+					label=l10n.apps_title()
+					on_press=move || apps.navigate(Route::Apps)
+					seed=404
 				/>
 				<chrome::Quiet
 					label=l10n.settings_title()

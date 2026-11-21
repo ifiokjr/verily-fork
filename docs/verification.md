@@ -165,7 +165,7 @@ sequenceDiagram
    the camera warms up. Keys from closed windows, and the single long-lived
    key earlier builds used, are deleted.
 3. **Bind.** After capture the app computes the evidence binding hash
-   (`verily-evidence-binding-v1`, from `packages/verily_evidence`), which
+   (`verily-evidence-binding-v1`, from `verily_kit/verily_shared`), which
    covers kind, capture time, SHA-256, byte length, duration (zero for
    photos), and content type, so nothing vouching for one file can vouch for
    another. The Play Integrity request hash (`verily-capture-request-v2`)
@@ -641,12 +641,8 @@ after commit, or by the one-minute recovery sweep.
 
 ## Schema contracts
 
-The baseline migration (`verily_server/migrations/20261021215105708-verily-baseline`)
-is Serverpod's generated schema plus `tool/schema_contracts.sql`, composed by
-`tool/compose_schema_baseline.dart`. The supplement adds only CHECK
-constraints, functions, and triggers (no indexes, foreign keys, or columns), so
-Serverpod's development-mode schema check still passes. It enforces bounds on
-every value-bearing table, append-only receipts and audits, the no-mixing and
-creator-binding rules for Apps, frozen reward terms, and payout invariants.
-`dart run tool/verify_schema_contracts.dart` checks a live database read-only
-(42 constraints, 9 triggers).
+The database schema lives in `verily_kit/verily_backend/src/schema/` with
+matching SQLite (`migrations/`) and PostgreSQL/PostGIS (`migrations-postgres/`)
+migrations plus row-level security (`#[db(policy(...))]`) policies enforcing
+owner-only drafts/attempts, reviewer-only queues without self-review,
+append-only audits, frozen reward terms, and payout invariants.
