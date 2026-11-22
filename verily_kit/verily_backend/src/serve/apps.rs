@@ -370,7 +370,7 @@ pub async fn start_verification_request(
 		.map_err(db)?
 		.ok_or_else(|| rpc::Error::not_found("notFound"))?;
 	if row.expires_at < Utc::now() {
-		row.status = "expired".to_owned();
+		"expired".clone_into(&mut row.status);
 		row.save(cx.tx()).await.map_err(db)?;
 		return Err(rpc::Error::invalid("requestExpired"));
 	}
@@ -378,7 +378,7 @@ pub async fn start_verification_request(
 		return Err(rpc::Error::conflict("requestUnavailable"));
 	}
 	row.participant_id = Some(participant);
-	row.status = "in_progress".to_owned();
+	"in_progress".clone_into(&mut row.status);
 	row.save(cx.tx()).await.map_err(db)?;
 	verification_request_dto(cx.tx(), row).await
 }
@@ -404,7 +404,7 @@ pub async fn cancel_verification_request(
 	if row.participant_id != Some(caller) && !is_owner {
 		return Err(rpc::Error::forbidden("forbidden"));
 	}
-	row.status = "cancelled".to_owned();
+	"cancelled".clone_into(&mut row.status);
 	row.save(cx.tx()).await.map_err(db)?;
 	verification_request_dto(cx.tx(), row).await
 }

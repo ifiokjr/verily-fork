@@ -338,10 +338,10 @@ impl KeyDescription {
 	) -> Result<Option<&AttestationApplicationId>, DerError> {
 		let software = self.software_enforced.attestation_application_id.as_ref();
 		let hardware = self.hardware_enforced.attestation_application_id.as_ref();
-		if let (Some(sw), Some(hw)) = (software, hardware) {
-			if !sw.same_identity_as(hw) {
-				return Err(DerError::new("Attestation application ids disagree."));
-			}
+		if let (Some(sw), Some(hw)) = (software, hardware)
+			&& !sw.same_identity_as(hw)
+		{
+			return Err(DerError::new("Attestation application ids disagree."));
 		}
 		Ok(hardware.or(software))
 	}
@@ -482,10 +482,10 @@ impl GoogleAttestationStatusSource {
 		&self,
 		now: DateTime<Utc>,
 	) -> Result<AttestationStatusList, AttestationStatusUnavailable> {
-		if let Some(cached) = self.cache.lock().unwrap().as_ref() {
-			if now < cached.fresh_until {
-				return Ok(cached.list.clone());
-			}
+		if let Some(cached) = self.cache.lock().unwrap().as_ref()
+			&& now < cached.fresh_until
+		{
+			return Ok(cached.list.clone());
 		}
 
 		let fetch_result = async {
@@ -793,8 +793,7 @@ impl AndroidKeyAttestationVerifier {
 		};
 		if hardware.origin != Some(keymint_tag::ORIGIN_GENERATED)
 			|| hardware.algorithm != Some(keymint_tag::ALGORITHM_EC)
-			|| !p256
-			|| !can_sign
+			|| !p256 || !can_sign
 		{
 			return KeyAttestationVerdict::untrusted(reason::KEY_INVALID, Some(leaf_pub));
 		}

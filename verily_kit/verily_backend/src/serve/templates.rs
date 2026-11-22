@@ -18,6 +18,10 @@ use crate::schema::NewAiUsageRow;
 const MAX_DRAFTS_PER_HOUR: usize = 10;
 
 /// Built-in starter templates creators can customize without AI keys.
+#[allow(
+	clippy::too_many_lines,
+	reason = "static catalog of twelve built-in starter templates"
+)]
 #[must_use]
 pub fn list_templates() -> Vec<ActionTemplateItem> {
 	vec![
@@ -181,11 +185,16 @@ pub async fn draft_action_from_prompt(
 	for req in &generated.requirements {
 		let kind = match req.kind.as_str() {
 			"video" => ProofKind::Video,
-			"photo" => ProofKind::Photo,
 			"audio" => ProofKind::Audio,
 			"location" => {
 				if let Some(r) = req.radius_meters {
-					radius_meters = (r.round() as i64).clamp(10, 50_000);
+					#[allow(
+						clippy::cast_possible_truncation,
+						reason = "clamped into 10.0..=50_000.0 before rounding to i64"
+					)]
+					{
+						radius_meters = r.clamp(10.0, 50_000.0).round() as i64;
+					}
 				}
 				latitude = req.latitude;
 				longitude = req.longitude;

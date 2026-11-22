@@ -84,18 +84,25 @@ impl ReceiptSigner {
 	/// Returns `None` when unset so release builds can fail closed if needed.
 	#[must_use]
 	pub fn from_env() -> Option<Self> {
-		let raw = std::env::var("VERILY_RECEIPT_SIGNING_PRIVATE_KEY").ok()?;
+		let env_map: std::collections::HashMap<String, String> = std::env::vars().collect();
+		Self::from_env_map(&env_map)
+	}
+
+	/// Resolves from an explicit environment map (for deterministic startup & tests).
+	#[must_use]
+	pub fn from_env_map(env_map: &std::collections::HashMap<String, String>) -> Option<Self> {
+		let raw = env_map.get("VERILY_RECEIPT_SIGNING_PRIVATE_KEY")?;
 		let bytes = URL_SAFE_NO_PAD.decode(raw.trim().as_bytes()).ok()?;
 		let seed: [u8; 32] = bytes.try_into().ok()?;
-		let kid = std::env::var("VERILY_RECEIPT_SIGNING_KEY_ID")
-			.ok()
+		let kid = env_map
+			.get("VERILY_RECEIPT_SIGNING_KEY_ID")
 			.map(|s| s.trim().to_owned())
 			.filter(|s| !s.is_empty())
 			.unwrap_or_else(|| "verily-ed25519-1".to_owned());
 		Some(Self::from_seed(kid, seed, Vec::new()))
 	}
 
-	/// Signs a compact EdDSA (Ed25519) JWS over `claims`.
+	/// Signs a compact `EdDSA` (Ed25519) JWS over `claims`.
 	#[must_use]
 	pub fn sign_jws(&self, claims: &serde_json::Value) -> String {
 		let header = serde_json::json!({
@@ -136,6 +143,11 @@ fn jwk_entry(kid: &str, vk: &VerifyingKey) -> serde_json::Value {
 
 /// Validates an outbound partner webhook / pull-check URL against SSRF:
 /// must be `https://`, no userinfo, and cannot literal-target loopback/private/link-local IPs.
+///
+/// # Errors
+///
+/// Returns a static error code when the URL is malformed, non-HTTPS, contains
+/// userinfo, or targets a private/loopback host or IP literal.
 pub fn validate_outbound_url(raw: &str) -> Result<url::Url, &'static str> {
 	let parsed = url::Url::parse(raw.trim()).map_err(|_| "invalid_url")?;
 	if parsed.scheme() != "https" {
@@ -145,16 +157,18 @@ pub fn validate_outbound_url(raw: &str) -> Result<url::Url, &'static str> {
 		return Err("userinfo_forbidden");
 	}
 	let host = parsed.host_str().ok_or("missing_host")?;
-	if host.eq_ignore_ascii_case("localhost")
-		|| host.ends_with(".local")
-		|| host.ends_with(".internal")
-	{
+	let host_lower = host.to_ascii_lowercase();
+	let private_tld = host_lower
+		.rsplit('.')
+		.next()
+		.is_some_and(|tld| matches!(tld, "local" | "internal"));
+	if host_lower == "localhost" || private_tld {
 		return Err("private_host_forbidden");
 	}
-	if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>() {
-		if is_forbidden_ip(ip) {
-			return Err("private_ip_forbidden");
-		}
+	if let Ok(ip) = host.trim_matches(['[', ']']).parse::<IpAddr>()
+		&& is_forbidden_ip(ip)
+	{
+		return Err("private_ip_forbidden");
 	}
 	Ok(parsed)
 }
@@ -183,6 +197,10 @@ pub const fn is_forbidden_ip(ip: IpAddr) -> bool {
 }
 
 /// Computes `sha256=<hex>` HMAC-SHA256 webhook signature over `timestamp.payload`.
+///
+/// # Panics
+///
+/// Never panics because HMAC-SHA256 accepts keys of any length.
 #[must_use]
 pub fn sign_webhook_payload(secret: &str, timestamp: i64, payload: &[u8]) -> String {
 	let mut mac =
@@ -195,6 +213,11 @@ pub fn sign_webhook_payload(secret: &str, timestamp: i64, payload: &[u8]) -> Str
 
 /// Delivers one signed partner webhook with DNS resolution SSRF verification
 /// and zero redirect following.
+///
+/// # Errors
+///
+/// Returns a static error code when URL validation, DNS resolution, SSRF IP
+/// checks, or HTTP delivery fail.
 pub async fn send_signed_webhook(
 	url_str: &str,
 	secret: &str,
@@ -236,17 +259,106 @@ pub async fn send_signed_webhook(
 	Ok(response.status().as_u16())
 }
 
+/// Strict verdict returned by a partner pull-check endpoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PullCheckVerdict {
+	Accepted,
+	Rejected,
+	Pending,
+}
+
+const MAX_PULL_CHECK_RESPONSE_BYTES: usize = 32 * 1024;
+
+/// Parses a partner pull-check response under a strict schema (`{"verdict": ...}`).
+/// Rejects oversized bodies, non-JSON prose, or unknown verdicts.
+#[must_use]
+pub fn parse_pull_check_verdict(body: &[u8]) -> Option<PullCheckVerdict> {
+	if body.is_empty() || body.len() > MAX_PULL_CHECK_RESPONSE_BYTES {
+		return None;
+	}
+	let value: serde_json::Value = serde_json::from_slice(body).ok()?;
+	let obj = value.as_object()?;
+	let verdict = obj.get("verdict")?.as_str()?.trim();
+	match verdict {
+		"accepted" => Some(PullCheckVerdict::Accepted),
+		"rejected" => Some(PullCheckVerdict::Rejected),
+		"pending" => Some(PullCheckVerdict::Pending),
+		_ => None,
+	}
+}
+
+/// Sends one signed partner pull-check request (`x-verily-event: attempt.verify`)
+/// with DNS-pinned SSRF protection, zero redirects, and a 32 KiB response cap.
+///
+/// # Errors
+///
+/// Returns a static error code when URL validation, DNS resolution, SSRF IP
+/// checks, HTTP delivery, or response size checks fail.
+pub async fn send_signed_pull_check(
+	url_str: &str,
+	secret: &str,
+	payload: &[u8],
+) -> Result<(u16, Vec<u8>), &'static str> {
+	let parsed = validate_outbound_url(url_str)?;
+	let host = parsed.host_str().ok_or("missing_host")?;
+	let port = parsed.port_or_known_default().unwrap_or(443);
+
+	let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host, port))
+		.await
+		.map_err(|_| "dns_failed")?
+		.collect();
+	if addrs.is_empty() || addrs.iter().any(|addr| is_forbidden_ip(addr.ip())) {
+		return Err("private_ip_forbidden");
+	}
+	let pinned_addr = addrs[0];
+
+	let client = reqwest::Client::builder()
+		.timeout(Duration::from_secs(10))
+		.redirect(reqwest::redirect::Policy::none())
+		.resolve(host, pinned_addr)
+		.build()
+		.map_err(|_| "http_client_failed")?;
+
+	let ts = Utc::now().timestamp();
+	let sig = sign_webhook_payload(secret, ts, payload);
+	let response = client
+		.post(parsed)
+		.header("content-type", "application/json")
+		.header("x-verily-event", "attempt.verify")
+		.header("x-verily-timestamp", ts.to_string())
+		.header("x-verily-signature-256", sig)
+		.body(payload.to_vec())
+		.send()
+		.await
+		.map_err(|_| "delivery_failed")?;
+	let status = response.status().as_u16();
+	if response
+		.content_length()
+		.is_some_and(|len| len > MAX_PULL_CHECK_RESPONSE_BYTES as u64)
+	{
+		return Err("response_too_large");
+	}
+	let bytes = response.bytes().await.map_err(|_| "delivery_failed")?;
+	if bytes.len() > MAX_PULL_CHECK_RESPONSE_BYTES {
+		return Err("response_too_large");
+	}
+	Ok((status, bytes.to_vec()))
+}
+
 #[derive(Clone)]
 struct HttpState {
 	db: Db,
 	backend: BackendHandle,
 }
 
-/// Mounts `/healthz`, `/.well-known/jwks.json`, `/api/v1/*`, and dev local evidence routes.
+/// Mounts `/api/v1/health`, `/.well-known/jwks.json`, `/api/v1/*`, and dev local evidence routes.
+///
+/// Liveness (`/healthz`) and readiness (`/readyz`) are owned by `leptoskit::server::Readiness`
+/// on the binary host so graceful shutdown can drain probes cleanly.
 pub fn router(db: Db, backend: BackendHandle) -> Router {
 	let state = Arc::new(HttpState { db, backend });
 	Router::new()
-		.route("/healthz", get(healthz))
+		.route("/api/v1/health", get(healthz))
 		.route("/.well-known/jwks.json", get(jwks))
 		.route("/api/v1/confirmations", post(post_confirmation))
 		.route("/api/v1/actions", post(post_partner_action))
@@ -280,7 +392,13 @@ async fn healthz(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
 }
 
 async fn jwks(State(state): State<Arc<HttpState>>) -> impl IntoResponse {
-	Json(state.backend.0.receipt_signer.jwks())
+	let doc = state
+		.backend
+		.0
+		.receipt_signer
+		.as_ref()
+		.map_or_else(|| serde_json::json!({ "keys": [] }), |s| s.jwks());
+	Json(doc)
 }
 
 async fn authenticate_app(db: &Db, headers: &HeaderMap) -> Result<VerilyAppRow, StatusCode> {
@@ -583,6 +701,9 @@ async fn get_verification_receipt(
 	let receipt = if let Some(existing) = &row.receipt_jws {
 		existing.clone()
 	} else {
+		let Some(signer) = &state.backend.0.receipt_signer else {
+			return Err(StatusCode::SERVICE_UNAVAILABLE);
+		};
 		let claims = serde_json::json!({
 			"iss": "https://verily.fun",
 			"aud": app.slug,
@@ -592,7 +713,7 @@ async fn get_verification_receipt(
 			"status": "verified",
 			"iat": Utc::now().timestamp(),
 		});
-		let jws = state.backend.0.receipt_signer.sign_jws(&claims);
+		let jws = signer.sign_jws(&claims);
 		row.receipt_jws = Some(jws.clone());
 		let _ = row.save(&state.db).await;
 		jws
@@ -675,8 +796,8 @@ mod tests {
 		let keys = jwks["keys"].as_array().unwrap();
 		assert_eq!(keys.len(), 1);
 		assert_eq!(keys[0]["crv"], "Ed25519");
-		let jws = signer.sign_jws(&serde_json::json!({ "status": "verified" }));
-		let parts: Vec<&str> = jws.split('.').collect();
+		let token = signer.sign_jws(&serde_json::json!({ "status": "verified" }));
+		let parts: Vec<&str> = token.split('.').collect();
 		assert_eq!(parts.len(), 3);
 	}
 
@@ -685,5 +806,26 @@ mod tests {
 		let sig = sign_webhook_payload("whsec_test", 1_700_000_000, br#"{"ok":true}"#);
 		assert!(sig.starts_with("sha256="));
 		assert_eq!(sig.len(), 7 + 64);
+	}
+
+	#[test]
+	fn pull_check_verdict_parser_enforces_strict_schema() {
+		assert_eq!(
+			parse_pull_check_verdict(br#"{"verdict":"accepted"}"#),
+			Some(PullCheckVerdict::Accepted)
+		);
+		assert_eq!(
+			parse_pull_check_verdict(br#"{"verdict":"rejected"}"#),
+			Some(PullCheckVerdict::Rejected)
+		);
+		assert_eq!(
+			parse_pull_check_verdict(br#"{"verdict":"pending"}"#),
+			Some(PullCheckVerdict::Pending)
+		);
+		assert_eq!(parse_pull_check_verdict(br#"{"verdict":"approved"}"#), None);
+		assert_eq!(parse_pull_check_verdict(b"accepted"), None);
+		assert_eq!(parse_pull_check_verdict(b""), None);
+		let oversized = vec![b' '; MAX_PULL_CHECK_RESPONSE_BYTES + 1];
+		assert_eq!(parse_pull_check_verdict(&oversized), None);
 	}
 }

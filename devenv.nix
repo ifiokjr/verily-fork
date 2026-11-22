@@ -41,7 +41,7 @@ let
   kitPort = "8184";
   sitePort = "8183";
   postgresPort = 8191;
-  leptoskitRev = "03e3ececb662b5b9d5117f9e38cac6774f5a7073";
+  leptoskitRev = "21a5f55fea25e9c1f043da51aae77bcc6296aeb3";
   devenvGitHook =
     name: script: arguments:
     pkgs.writeShellScript name ''

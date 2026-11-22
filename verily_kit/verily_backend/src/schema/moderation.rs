@@ -90,7 +90,7 @@ pub struct AiUsageRow {
 	pub created_at: Timestamp,
 }
 
-/// Per-call inference cost reservation ledger for OpenRouter budget caps.
+/// Per-call inference cost reservation ledger for `OpenRouter` budget caps.
 #[table(name = "inference_cost_reservations", index(created_at))]
 pub struct InferenceReservationRow {
 	pub id: Id<InferenceReservationRow>,

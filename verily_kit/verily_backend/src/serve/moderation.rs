@@ -57,6 +57,10 @@ pub async fn is_action_safety_held(
 
 /// Pseudonymizes an account or device identifier using HMAC-SHA256 keyed by
 /// `VERILY_ABUSE_RISK_SALT` so raw identifiers are not stored in risk tables.
+///
+/// # Panics
+///
+/// Never panics because HMAC-SHA256 accepts keys of any length.
 #[must_use]
 pub fn pseudonymize_subject(salt: &[u8], subject: &str) -> String {
 	let mut mac = HmacSha256::new_from_slice(salt).expect("HMAC accepts any key length");
@@ -216,17 +220,32 @@ pub async fn resolve_appeal(
 	.await
 	.map_err(db)?;
 
-	if overturn {
-		if let Some(mut attempt) = Attempt::query()
+	if overturn
+		&& let Some(mut attempt) = Attempt::query()
 			.filter(|row| row.id.eq(appeal.attempt_id))
 			.first(cx.tx())
 			.await
 			.map_err(db)?
+	{
+		status_name(AttemptStatus::Verified).clone_into(&mut attempt.status);
+		attempt.verified_at = Some(Utc::now());
+		attempt.rejection_code = None;
+		attempt.save(cx.tx()).await.map_err(db)?;
+		if let Ok(backend) = super::backend(cx.context())
+			&& let Some(action) = ActionRow::query()
+				.filter(|row| row.id.eq(attempt.action_id))
+				.first(cx.tx())
+				.await
+				.map_err(db)?
 		{
-			attempt.status = status_name(AttemptStatus::Verified).to_owned();
-			attempt.verified_at = Some(Utc::now());
-			attempt.rejection_code = None;
-			attempt.save(cx.tx()).await.map_err(db)?;
+			super::notify_attempt_outcome(
+				cx.tx(),
+				backend,
+				&action,
+				&attempt,
+				AttemptStatus::Verified,
+			)
+			.await?;
 		}
 	}
 
@@ -388,7 +407,7 @@ pub async fn appeal_moderation(
 	if !matches!(case_row.status.as_str(), "held" | "removed") {
 		return Err(rpc::Error::conflict("cannotAppeal"));
 	}
-	case_row.status = "appealed".to_owned();
+	"appealed".clone_into(&mut case_row.status);
 	case_row.save(cx.tx()).await.map_err(db)?;
 
 	NewModerationAuditRow {

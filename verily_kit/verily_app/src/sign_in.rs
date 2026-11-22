@@ -214,7 +214,6 @@ pub fn SignIn() -> Element {
 		.data()
 		.is_some_and(|list| list.iter().any(|p| p.id == "google"));
 	let google_button = has_google.then(|| {
-		let l10n = l10n.clone();
 		view! {
 			<chrome::Quiet
 				label=l10n.sign_in_have_account_prompt()

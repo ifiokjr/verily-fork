@@ -13,8 +13,13 @@ use leptoskit::server::tokio;
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
 	let (config, _) = leptoskit::config::LeptoskitConfig::load()?;
 	let secrets = verily_backend::load_host_secrets()?;
-	let db = leptoskit::db::Db::connect(secrets.database_url()?).await?;
-	db.migrate(verily_backend::POSTGRES_MIGRATIONS).await?;
+	let database_url = secrets.database_url()?;
+	let db = leptoskit::db::Db::connect(database_url).await?;
+	if database_url.starts_with("sqlite:") {
+		db.migrate(verily_backend::MIGRATIONS).await?;
+	} else {
+		db.migrate(verily_backend::POSTGRES_MIGRATIONS).await?;
+	}
 	let auth = verily_backend::build_auth(&db, &secrets, Some(&config))?;
 	// Use LeptosKit's development mailbox and its debug-only route. The
 	// backend's in-memory test mailer alone has no page to read codes from.

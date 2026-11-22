@@ -122,7 +122,12 @@ fn tokio_handle_or_runtime<F: std::future::Future<Output = ProviderResponse>>(
 	future: F,
 ) -> Option<ProviderResponse> {
 	if let Ok(handle) = tokio::runtime::Handle::try_current() {
-		Some(tokio::task::block_in_place(|| handle.block_on(future)))
+		match handle.runtime_flavor() {
+			tokio::runtime::RuntimeFlavor::MultiThread => {
+				Some(tokio::task::block_in_place(|| handle.block_on(future)))
+			}
+			_ => Some(handle.block_on(future)),
+		}
 	} else {
 		let rt = tokio::runtime::Builder::new_current_thread()
 			.enable_all()
@@ -150,6 +155,15 @@ pub fn check_production_ai_deployment(
 		VerifierMode::OpenRouter => {
 			if !config.prompt_injection_guard {
 				return Err(
+					"Production OpenRouter mode requires VERILY_OPENROUTER_PROMPT_INJECTION_GUARD=block."
+						.to_string(),
+				);
+			}
+			let confirmed = environment
+				.get("VERILY_OPENROUTER_PROMPT_INJECTION_GUARD_CONFIRMED")
+				.is_some_and(|v| v.trim().eq_ignore_ascii_case("true"));
+			if !confirmed {
+				return Err(
 					"Production OpenRouter mode requires VERILY_OPENROUTER_PROMPT_INJECTION_GUARD_CONFIRMED=true."
 						.to_string(),
 				);
@@ -157,7 +171,6 @@ pub fn check_production_ai_deployment(
 			if !config.require_zero_data_retention {
 				return Err("Production OpenRouter mode requires zero data retention.".to_string());
 			}
-			let _ = environment;
 			Ok(())
 		}
 		VerifierMode::Cloud => {
@@ -551,6 +564,14 @@ mod tests {
 		assert!(check_production_ai_deployment(&no_zdr, &env, true).is_err());
 
 		env.insert("VERILY_OPENROUTER_REQUIRE_ZDR".into(), "true".into());
+		let unconfirmed = VerifierConfig::from_resolved(&env, None, Some("sk-or-test")).unwrap();
+		assert!(check_production_ai_deployment(&unconfirmed, &env, true).is_err());
+		assert!(check_production_ai_deployment(&unconfirmed, &env, false).is_ok());
+
+		env.insert(
+			"VERILY_OPENROUTER_PROMPT_INJECTION_GUARD_CONFIRMED".into(),
+			"true".into(),
+		);
 		let guarded = VerifierConfig::from_resolved(&env, None, Some("sk-or-test")).unwrap();
 		assert!(check_production_ai_deployment(&guarded, &env, true).is_ok());
 	}

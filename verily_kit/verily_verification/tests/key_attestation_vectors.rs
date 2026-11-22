@@ -96,6 +96,10 @@ impl Vector {
 		self.certs[0].public_key.p256_point().map(ToOwned::to_owned)
 	}
 
+	#[allow(
+		clippy::too_many_arguments,
+		reason = "test fixture helper overriding individual policy inputs"
+	)]
 	fn verify_with(
 		&self,
 		chain_override: Option<&[Vec<u8>]>,

@@ -1,5 +1,5 @@
 //! Media upload reservations, verification jobs/votes, venue QR challenges,
-//! Apple App Attest keys/challenges, and DeviceCheck audit rows.
+//! Apple App Attest keys/challenges, and `DeviceCheck` audit rows.
 
 use leptoskit_auth::Account as AuthAccount;
 use leptoskit_db::Id;
@@ -123,7 +123,7 @@ pub struct AppAttestKeyRow {
 	/// Uncompressed P-256 public key `0x04 || X || Y` in base64.
 	#[db(private, min_len = 1, max_len = 128)]
 	pub public_key_b64: String,
-	/// Monotonic WebAuthn assertion counter to prevent assertion replay.
+	/// Monotonic `WebAuthn` assertion counter to prevent assertion replay.
 	pub sign_count: i64,
 	/// Latest Apple receipt in base64 for background refresh.
 	#[db(private)]
@@ -137,7 +137,7 @@ pub struct AppAttestKeyRow {
 	pub updated_at: Timestamp,
 }
 
-/// Audit log of operator DeviceCheck queries and bit mutations.
+/// Audit log of operator `DeviceCheck` queries and bit mutations.
 #[table(name = "device_check_audits", index(operator_id))]
 pub struct DeviceCheckAuditRow {
 	pub id: Id<DeviceCheckAuditRow>,

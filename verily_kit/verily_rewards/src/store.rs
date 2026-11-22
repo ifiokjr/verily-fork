@@ -532,20 +532,18 @@ pub async fn release_payout(
 			code: decide::ReleaseCode::SignerUnavailable,
 			retryable: true,
 		}
-	) {
-		if let (crate::gateway::Gateway::Solana(solana), Some(signers), Some(vault_addr)) =
-			(&rewards.gateway, rewards.signers(), vault_address)
-		{
-			outcome = solana
-				.submit_release(
-					escrow_address,
-					vault_addr,
-					recipient_address,
-					payout_index,
-					signers,
-				)
-				.await;
-		}
+	) && let (crate::gateway::Gateway::Solana(solana), Some(signers), Some(vault_addr)) =
+		(&rewards.gateway, rewards.signers(), vault_address)
+	{
+		outcome = solana
+			.submit_release(
+				escrow_address,
+				vault_addr,
+				recipient_address,
+				payout_index,
+				signers,
+			)
+			.await;
 	}
 	if matches!(
 		outcome,

@@ -25,8 +25,8 @@ pub struct ActionPlace {
 	pub latitude: Option<f64>,
 	#[db(private)]
 	pub longitude: Option<f64>,
-	/// PostGIS geography point (SRID 4326) with GiST spatial index on Postgres
-	/// and exact spatial parity on SQLite. Never leaves the server.
+	/// `PostGIS` geography point (SRID 4326) with `GiST` spatial index on Postgres
+	/// and exact spatial parity on `SQLite`. Never leaves the server.
 	#[db(geo(index), private)]
 	pub location: Option<Geography<Point>>,
 	#[db(created_at)]

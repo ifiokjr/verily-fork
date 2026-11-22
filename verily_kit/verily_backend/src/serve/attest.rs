@@ -1,5 +1,5 @@
 //! Media upload reservations, venue QR challenges, Apple App Attest key
-//! registration & assertion verification, and Apple DeviceCheck operator tools.
+//! registration & assertion verification, and Apple `DeviceCheck` operator tools.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
@@ -336,7 +336,7 @@ pub async fn register_app_attest_key(
 }
 
 /// Verifies a signed Apple App Attest assertion against a registered key and
-/// atomically advances its monotonic WebAuthn signature counter.
+/// atomically advances its monotonic `WebAuthn` signature counter.
 pub(crate) async fn verify_registered_app_attest_assertion(
 	connection: &impl Connection,
 	backend: &Backend,
@@ -379,7 +379,7 @@ pub(crate) async fn verify_registered_app_attest_assertion(
 	Ok(true)
 }
 
-/// Operator query of an iPhone's Apple DeviceCheck two-bit state.
+/// Operator query of an iPhone's Apple `DeviceCheck` two-bit state.
 pub async fn query_device_check(
 	cx: &rpc::MutationCx,
 	device_token: String,
@@ -413,7 +413,7 @@ pub async fn query_device_check(
 	})
 }
 
-/// Operator update of an iPhone's Apple DeviceCheck two-bit state.
+/// Operator update of an iPhone's Apple `DeviceCheck` two-bit state.
 pub async fn update_device_check(
 	cx: &rpc::MutationCx,
 	device_token: String,

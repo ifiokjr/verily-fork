@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use crate::evidence::Inspection;
 
 type HmacSha256 = Hmac<Sha256>;
+const MAX_EVIDENCE_READ_BYTES: usize = 128 * 1024 * 1024;
 
 /// Storage configuration loaded from Monosecret-resolved environment variables.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +206,29 @@ impl EvidenceStore {
 		match self {
 			Self::Local(local) => local.inspect_version(object_key, version_id),
 			Self::BackblazeB2(b2) => b2.inspect_version(object_key, version_id).await,
+		}
+	}
+
+	/// Read immutable original bytes and content type for a pinned storage version
+	/// (bounded to 128 MiB so background workers cannot OOM).
+	pub async fn read_version_bytes(
+		&self,
+		object_key: &str,
+		version_id: &str,
+	) -> Result<(Vec<u8>, String), StorageError> {
+		validate_object_key(object_key)?;
+		validate_version_id(version_id)?;
+		match self {
+			Self::Local(local) => {
+				let (bytes, mime) = local.read_bytes(object_key, version_id)?;
+				if bytes.len() > MAX_EVIDENCE_READ_BYTES {
+					return Err(StorageError::Transport(
+						"evidence object exceeds maximum replay byte limit".to_owned(),
+					));
+				}
+				Ok((bytes, mime))
+			}
+			Self::BackblazeB2(b2) => b2.read_version_bytes(object_key, version_id).await,
 		}
 	}
 
@@ -430,12 +454,13 @@ impl BackblazeB2Storage {
 		})
 	}
 
-	/// Download an immutable object version and compute its exact SHA-256 and byte length.
-	pub async fn inspect_version(
+	/// Download an immutable object version and return its raw bytes and content type
+	/// (bounded to 128 MiB).
+	pub async fn read_version_bytes(
 		&self,
 		object_key: &str,
 		version_id: &str,
-	) -> Result<Inspection, StorageError> {
+	) -> Result<(Vec<u8>, String), StorageError> {
 		let read = self.presign_get_version(object_key, version_id, Utc::now(), 120)?;
 		let resp = self
 			.http
@@ -449,6 +474,13 @@ impl BackblazeB2Storage {
 		if !resp.status().is_success() {
 			return Err(StorageError::Transport(format!("HTTP {}", resp.status())));
 		}
+		if let Some(len) = resp.content_length()
+			&& len as usize > MAX_EVIDENCE_READ_BYTES
+		{
+			return Err(StorageError::Transport(
+				"evidence object exceeds maximum replay byte limit".to_owned(),
+			));
+		}
 		let content_type = resp
 			.headers()
 			.get(reqwest::header::CONTENT_TYPE)
@@ -459,6 +491,21 @@ impl BackblazeB2Storage {
 			.bytes()
 			.await
 			.map_err(|e| StorageError::Transport(e.to_string()))?;
+		if bytes.len() > MAX_EVIDENCE_READ_BYTES {
+			return Err(StorageError::Transport(
+				"evidence object exceeds maximum replay byte limit".to_owned(),
+			));
+		}
+		Ok((bytes.to_vec(), content_type))
+	}
+
+	/// Download an immutable object version and compute its exact SHA-256 and byte length.
+	pub async fn inspect_version(
+		&self,
+		object_key: &str,
+		version_id: &str,
+	) -> Result<Inspection, StorageError> {
+		let (bytes, content_type) = self.read_version_bytes(object_key, version_id).await?;
 		Ok(Inspection {
 			version_id: version_id.to_owned(),
 			byte_length: bytes.len() as u64,
@@ -688,6 +735,12 @@ mod tests {
 		assert_eq!(info.version_id, vid);
 
 		let store = EvidenceStore::Local(local);
+		let (raw_bytes, raw_mime) = store
+			.read_version_bytes("evidence/att-1/req-1.jpg", &vid)
+			.await
+			.unwrap();
+		assert_eq!(raw_bytes, b"hello-proof");
+		assert_eq!(raw_mime, "image/jpeg");
 		let inspected = store
 			.inspect_version("evidence/att-1/req-1.jpg", &vid)
 			.await
@@ -702,6 +755,12 @@ mod tests {
 			.delete_version("evidence/att-1/req-1.jpg", &vid)
 			.await
 			.unwrap();
+		assert!(matches!(
+			store
+				.read_version_bytes("evidence/att-1/req-1.jpg", &vid)
+				.await,
+			Err(StorageError::NotFound)
+		));
 		assert!(matches!(
 			store
 				.inspect_version("evidence/att-1/req-1.jpg", &vid)

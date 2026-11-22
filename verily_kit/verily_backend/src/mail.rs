@@ -1,7 +1,7 @@
 //! Resend HTTP mailer implementing `leptoskit_auth::Mailer`.
 //!
 //! Used in staging/production when `VERILY_RESEND_API_KEY` is configured via
-//! Monosecret. Local development defaults to LeptosKit's in-app mailbox so
+//! Monosecret. Local development defaults to `LeptosKit`'s in-app mailbox so
 //! development needs zero cloud secrets.
 
 use std::time::Duration;
@@ -24,6 +24,10 @@ pub struct ResendMailer {
 
 impl ResendMailer {
 	/// Build a Resend mailer from resolved secret values.
+	///
+	/// # Panics
+	///
+	/// Panics if the underlying TLS HTTP client cannot be initialized.
 	#[must_use]
 	pub fn new(api_key: String, from: String) -> Self {
 		let client = reqwest::Client::builder()

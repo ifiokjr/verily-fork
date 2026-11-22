@@ -150,6 +150,9 @@ pub enum StartError {
 	/// Verification mount refused to start (fail closed).
 	#[error(transparent)]
 	Verification(#[from] verily_verification::config::ConfigError),
+	/// Evidence storage configuration failed closed (e.g. local storage in production).
+	#[error(transparent)]
+	Storage(#[from] verily_verification::storage::StorageError),
 	/// Rewards mount refused to start (fail closed).
 	#[error(transparent)]
 	Rewards(#[from] verily_rewards::ConfigError),
@@ -232,7 +235,7 @@ pub fn start(
 		None => None,
 	};
 
-	let verification = Arc::new(verification::mount()?);
+	let verification = Arc::new(verification::mount_from_env(!cfg!(debug_assertions))?);
 	#[cfg(debug_assertions)]
 	let rewards = rewards::handle(rewards::mount_development()?);
 	#[cfg(not(debug_assertions))]
@@ -254,12 +257,13 @@ pub fn start(
 		rewards::handle(mounted)
 	};
 
-	let backend = BackendHandle::new(Backend::from_env(
+	let backend = BackendHandle::new(Backend::from_env_checked(
 		rewards.0.clone(),
 		verification.clone(),
 		Some(auth.clone()),
 		Some(db.clone()),
-	));
+		!cfg!(debug_assertions),
+	)?);
 
 	let identify = identify(auth.clone(), rewards.clone(), backend.clone());
 	let rpc = operations(db.clone()).identify(identify.clone());

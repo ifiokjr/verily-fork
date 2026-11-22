@@ -328,12 +328,14 @@ impl<'a> DerElement<'a> {
 				Ok(value.iter().map(|&b| char::from(b)).collect())
 			}
 			tag::BMP_STRING => {
-				if value.len() % 2 != 0 {
+				if !value.len().is_multiple_of(2) {
 					return Err(DerError::new("Invalid BMPString length."));
 				}
 				let units: Vec<u16> = value
-					.chunks_exact(2)
-					.map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+					.as_chunks::<2>()
+					.0
+					.iter()
+					.map(|pair| u16::from_be_bytes(*pair))
 					.collect();
 				String::from_utf16(&units).map_err(|_| DerError::new("Invalid BMPString."))
 			}
@@ -732,7 +734,7 @@ pub fn verify_ecdsa_der(
 				return false;
 			};
 			let Ok(sig) = p256::ecdsa::DerSignature::from_bytes(signature_der)
-				.and_then(|d| p256::ecdsa::Signature::try_from(d))
+				.and_then(p256::ecdsa::Signature::try_from)
 			else {
 				return false;
 			};
@@ -744,7 +746,7 @@ pub fn verify_ecdsa_der(
 				return false;
 			};
 			let Ok(sig) = p384::ecdsa::DerSignature::from_bytes(signature_der)
-				.and_then(|d| p384::ecdsa::Signature::try_from(d))
+				.and_then(p384::ecdsa::Signature::try_from)
 			else {
 				return false;
 			};

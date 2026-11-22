@@ -148,6 +148,10 @@ pub fn build_release_payout_instruction(
 
 /// Compiles, dual-signs (`fee_payer` + `arbiter`), cryptographically verifies,
 /// and encodes a `CreateAssociatedTokenIdempotent + ReleasePayout` v0 transaction.
+#[allow(
+	clippy::too_many_arguments,
+	reason = "explicit Solana release accounts, payout index, blockhash lifetime, and dual signers"
+)]
 pub async fn build_and_sign_release_transaction(
 	program: Address,
 	mint: Address,
@@ -382,42 +386,32 @@ pub async fn submit_and_confirm_release<T: Transport>(
 					commitment: Some(Commitment::Confirmed),
 					..ReadConfig::default()
 				})))
-				.await
+				.await && height > latest.last_valid_block_height
 			{
-				if height > latest.last_valid_block_height {
-					if let Ok(hist) = client
-						.call(SignatureStatuses(
-							&[signature],
-							Some(StatusesConfig {
-								search_transaction_history: Some(true),
-							}),
-						))
-						.await
-					{
-						if let Some(Some(status)) = hist.value.first() {
-							if status.err.is_none()
-								&& matches!(
-									status.confirmation_status,
-									Some(
-										ConfirmationStatus::Confirmed
-											| ConfirmationStatus::Finalized
-									)
-								) {
-								let sig_str = signature.to_string();
-								if let Some(confirmed) = confirmed_release_signature(&sig_str, true)
-								{
-									return ReleaseOutcome::Released {
-										signature: confirmed.to_owned(),
-									};
-								}
-							}
-						}
+				if let Ok(hist) = client
+					.call(SignatureStatuses(
+						&[signature],
+						Some(StatusesConfig {
+							search_transaction_history: Some(true),
+						}),
+					))
+					.await && let Some(Some(status)) = hist.value.first()
+					&& status.err.is_none()
+					&& matches!(
+						status.confirmation_status,
+						Some(ConfirmationStatus::Confirmed | ConfirmationStatus::Finalized)
+					) {
+					let sig_str = signature.to_string();
+					if let Some(confirmed) = confirmed_release_signature(&sig_str, true) {
+						return ReleaseOutcome::Released {
+							signature: confirmed.to_owned(),
+						};
 					}
-					return ReleaseOutcome::Failed {
-						code: ReleaseCode::BlockhashExpired,
-						retryable: true,
-					};
 				}
+				return ReleaseOutcome::Failed {
+					code: ReleaseCode::BlockhashExpired,
+					retryable: true,
+				};
 			}
 		}
 

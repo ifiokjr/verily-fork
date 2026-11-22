@@ -405,6 +405,10 @@ pub async fn submit_attestation(
 
 /// Binds a confirmed immutable storage upload (`reservation_id`) to an open
 /// capture window and queues background verification (`EvidenceVerificationJobRow`).
+#[allow(
+	clippy::too_many_lines,
+	reason = "linear transactional verification of upload reservation, capture window, spoken challenge, evidence, and job"
+)]
 pub async fn submit_media_proof(
 	cx: &rpc::MutationCx,
 	attempt_id: String,
@@ -524,6 +528,10 @@ pub async fn submit_media_proof(
 
 /// Evaluates a canonical device gyroscope + accelerometer motion trace
 /// deterministically on the server (never trusting client repetition counts).
+#[allow(
+	clippy::too_many_lines,
+	reason = "linear transactional verification of motion trace, capture window, evidence, and deterministic scoring"
+)]
 pub async fn submit_motion_proof(
 	cx: &rpc::MutationCx,
 	attempt_id: String,
@@ -795,7 +803,7 @@ pub async fn submit_device_attestation(
 			if let (Some(pi), Some(token)) = (&backend.play_integrity, integrity_token.as_deref()) {
 				let pi_verdict = pi.verify(token, &digest, now, false).await;
 				if pi_verdict.trusted {
-					provenance = "play_integrity_verified".to_owned();
+					"play_integrity_verified".clone_into(&mut provenance);
 				}
 			}
 			evidence.provenance_level = provenance;
@@ -820,7 +828,7 @@ pub async fn submit_device_attestation(
 			if !ok {
 				return Ok(AttestationReceipt { bound: false });
 			}
-			evidence.provenance_level = "secure_enclave_attested".to_owned();
+			"secure_enclave_attested".clone_into(&mut evidence.provenance_level);
 			evidence.capture_key_storage = Some("secureEnclaveAttested".to_owned());
 			evidence.save(cx.tx()).await.map_err(db)?;
 			Ok(AttestationReceipt { bound: true })
@@ -899,12 +907,14 @@ pub async fn complete_attempt(
 }
 
 /// Moves an attempt that is collecting evidence or pending review to where
-/// its proof puts it, and reserves the payout a verified attempt earned.
-pub(super) async fn settle(
+/// its proof puts it, reserves any payout earned, and notifies partner apps
+/// (stamping verification request receipts and queuing signed webhooks).
+pub(crate) async fn settle(
 	connection: &impl Connection,
 	backend: &Backend,
 	attempt: &mut Attempt,
 ) -> Result<AttemptStatus, rpc::Error> {
+	let prev_status = status_of(&attempt.status);
 	let mut action = ActionRow::query()
 		.filter(|row| row.id.eq(attempt.action_id))
 		.first(connection)
@@ -918,7 +928,7 @@ pub(super) async fn settle(
 		.filter(|requirement| requirement.is_required)
 	{
 		let Some(evidence) = evidence_for(connection, attempt, requirement).await? else {
-			return Ok(status_of(&attempt.status));
+			return Ok(prev_status);
 		};
 		decisions.push(latest_decision(connection, evidence.id).await?);
 	}
@@ -935,23 +945,167 @@ pub(super) async fn settle(
 		.any(|decision| decision != &Some(EvidenceDecisionStatus::Accepted))
 	{
 		AttemptStatus::PendingReview
-	} else if action
-		.max_verified_completions
-		.is_some_and(|limit| action.verified_completions >= limit)
+	} else if prev_status != AttemptStatus::Verified
+		&& action
+			.max_verified_completions
+			.is_some_and(|limit| action.verified_completions >= limit)
 	{
 		AttemptStatus::CapacityReached
 	} else {
-		action.verified_completions += 1;
-		action.updated_at = now;
-		action.save(connection).await.map_err(db)?;
-		attempt.verified_at = Some(now);
-		attempt.reward_outcome = reserve_reward(connection, backend, &action, attempt).await?;
+		if prev_status != AttemptStatus::Verified {
+			action.verified_completions += 1;
+			action.updated_at = now;
+			action.save(connection).await.map_err(db)?;
+		}
+		attempt.verified_at.get_or_insert(now);
+		if attempt.reward_outcome.is_none() {
+			attempt.reward_outcome = reserve_reward(connection, backend, &action, attempt).await?;
+		}
 		AttemptStatus::Verified
 	};
 	status_name(status).clone_into(&mut attempt.status);
 	attempt.submitted_at.get_or_insert(now);
 	attempt.save(connection).await.map_err(db)?;
+
+	if prev_status != status && matches!(status, AttemptStatus::Verified | AttemptStatus::Rejected)
+	{
+		notify_attempt_outcome(connection, backend, &action, attempt, status).await?;
+	}
 	Ok(status)
+}
+
+/// Stamps matching partner [`crate::schema::VerificationRequestRow`] entries with
+/// a signed Ed25519 JWS receipt and enqueues signed webhook deliveries
+/// (`attempt.verified` / `attempt.rejected`).
+#[allow(
+	clippy::too_many_lines,
+	reason = "stamps partner verification requests with JWS receipts and enqueues deduplicated webhooks"
+)]
+pub(crate) async fn notify_attempt_outcome(
+	connection: &impl Connection,
+	backend: &Backend,
+	action: &ActionRow,
+	attempt: &Attempt,
+	status: AttemptStatus,
+) -> Result<(), rpc::Error> {
+	let (status_str, event_type) = match status {
+		AttemptStatus::Verified => ("verified", "attempt.verified"),
+		AttemptStatus::Rejected => ("rejected", "attempt.rejected"),
+		_ => return Ok(()),
+	};
+	let now = Utc::now();
+	let mut notified_apps = std::collections::HashSet::new();
+
+	// 1. Stamp any matching partner-initiated verification requests.
+	let requests = crate::schema::VerificationRequestRow::query()
+		.filter(|r| r.action_id.eq(attempt.action_id))
+		.all(connection)
+		.await
+		.map_err(db)?;
+	for mut req in requests {
+		let bound_to_attempt = req.attempt_id == Some(attempt.id);
+		let open_for_participant = req.participant_id == Some(attempt.participant_id)
+			&& matches!(req.status.as_str(), "open" | "in_progress");
+		if !bound_to_attempt && !open_for_participant {
+			continue;
+		}
+		let app = crate::schema::VerilyAppRow::query()
+			.filter(|a| a.id.eq(req.app_id))
+			.first(connection)
+			.await
+			.map_err(db)?;
+		req.attempt_id = Some(attempt.id);
+		req.status = status_str.to_owned();
+		let mut signed_receipt = req.receipt_jws.clone();
+		if status == AttemptStatus::Verified
+			&& signed_receipt.is_none()
+			&& let (Some(signer), Some(app_row)) = (&backend.receipt_signer, &app)
+		{
+			let claims = serde_json::json!({
+				"iss": "https://verily.fun",
+				"aud": app_row.slug,
+				"sub": req.external_subject.clone().unwrap_or_else(|| attempt.participant_id.to_string()),
+				"jti": req.id.to_string(),
+				"actionId": req.action_id.to_string(),
+				"attemptId": attempt.id.to_string(),
+				"status": "verified",
+				"iat": now.timestamp(),
+			});
+			let jws = signer.sign_jws(&claims);
+			req.receipt_jws = Some(jws.clone());
+			signed_receipt = Some(jws);
+		}
+		req.save(connection).await.map_err(db)?;
+
+		if let Some(app_row) = app
+			&& app_row.active
+			&& app_row.webhook_url.is_some()
+			&& notified_apps.insert(app_row.id)
+		{
+			let payload = serde_json::json!({
+				"event": event_type,
+				"requestId": req.id.to_string(),
+				"attemptId": attempt.id.to_string(),
+				"actionId": attempt.action_id.to_string(),
+				"externalSubject": req.external_subject,
+				"status": status_str,
+				"receipt": signed_receipt,
+				"occurredAt": now.to_rfc3339(),
+			});
+			crate::schema::NewVerilyAppWebhookDeliveryRow {
+				app_id: app_row.id,
+				event_type: event_type.to_owned(),
+				payload_json: payload.to_string(),
+				status: "pending".to_owned(),
+				attempts: 0,
+				last_status_code: None,
+				next_attempt_at: now,
+			}
+			.insert(connection)
+			.await
+			.map_err(db)?;
+		}
+	}
+
+	// 2. Notify active partner apps owned by the action's creator that have a webhook URL.
+	let creator_id = Id::<AuthAccount>::from_uuid(action.creator_id);
+	let creator_apps = crate::schema::VerilyAppRow::query()
+		.filter(|a| a.owner_id.eq(creator_id))
+		.all(connection)
+		.await
+		.map_err(db)?;
+	for app_row in creator_apps {
+		if !app_row.active || app_row.webhook_url.is_none() || !notified_apps.insert(app_row.id) {
+			continue;
+		}
+		let link = crate::schema::VerilyAppLinkRow::query()
+			.filter(|l| l.app_id.eq(app_row.id) & l.account_id.eq(attempt.participant_id))
+			.first(connection)
+			.await
+			.map_err(db)?;
+		let payload = serde_json::json!({
+			"event": event_type,
+			"attemptId": attempt.id.to_string(),
+			"actionId": attempt.action_id.to_string(),
+			"externalUserId": link.map(|l| l.external_user_id),
+			"status": status_str,
+			"occurredAt": now.to_rfc3339(),
+		});
+		crate::schema::NewVerilyAppWebhookDeliveryRow {
+			app_id: app_row.id,
+			event_type: event_type.to_owned(),
+			payload_json: payload.to_string(),
+			status: "pending".to_owned(),
+			attempts: 0,
+			last_status_code: None,
+			next_attempt_at: now,
+		}
+		.insert(connection)
+		.await
+		.map_err(db)?;
+	}
+
+	Ok(())
 }
 
 /// Reserves the payout index a verified attempt earned, in this transaction,
@@ -1002,7 +1156,7 @@ pub(super) async fn latest_decision(
 		.and_then(|decision| decision_status(&decision.status)))
 }
 
-pub(super) async fn record_decision(
+pub(crate) async fn record_decision(
 	connection: &impl Connection,
 	evidence: Id<Evidence>,
 	status: EvidenceDecisionStatus,

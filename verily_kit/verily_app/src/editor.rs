@@ -57,11 +57,8 @@ pub fn Editor(draft: Option<String>) -> Element {
 	let is_new = draft.is_none();
 	let saved_id = remember(&format!("{key}.saved"), move || draft.clone());
 
-	let existing = use_rpc_query({
-		let saved_id = saved_id;
-		move || GetDraft {
-			action_id: saved_id.get().unwrap_or_default(),
-		}
+	let existing = use_rpc_query(move || GetDraft {
+		action_id: saved_id.get().unwrap_or_default(),
 	});
 	if !is_new
 		&& !hydrated.get()

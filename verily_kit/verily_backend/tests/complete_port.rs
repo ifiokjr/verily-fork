@@ -1,4 +1,4 @@
-//! End-to-end integration tests covering the complete LeptosKit port:
+//! End-to-end integration tests covering the complete `LeptosKit` port:
 //! - `/healthz`, `/.well-known/jwks.json`, `/_verily/local-evidence/*`
 //! - 12 templates, `get_draft`, `pause_action`, spatial nearby search
 //! - Presigned local upload -> `confirm_media_upload` -> `submit_media_proof` -> job sweep
@@ -10,6 +10,7 @@
 #![allow(
 	clippy::too_many_lines,
 	clippy::similar_names,
+	clippy::large_futures,
 	reason = "end-to-end port integration scenarios"
 )]
 
@@ -141,7 +142,7 @@ async fn templates_draft_edit_pause_and_spatial_nearby_work() {
 		)
 		.await
 		.unwrap();
-	assert!(far.is_empty());
+	assert_eq!(far, []);
 
 	// Pause hides the action from catalogue; resume brings it back.
 	let paused = world
@@ -490,10 +491,10 @@ async fn partner_http_api_jwks_healthz_local_upload_and_jobs_work_end_to_end() {
 	let host = verily_backend::start(&db, auth, None, verily_backend::Options::new(&db)).unwrap();
 	let router = host.router.clone();
 
-	// 1. /healthz and /.well-known/jwks.json
+	// 1. /api/v1/health and /.well-known/jwks.json
 	let health = router
 		.clone()
-		.oneshot(Request::get("/healthz").body(Body::empty()).unwrap())
+		.oneshot(Request::get("/api/v1/health").body(Body::empty()).unwrap())
 		.await
 		.unwrap();
 	assert_eq!(health.status(), StatusCode::OK);
@@ -657,7 +658,7 @@ async fn partner_http_api_jwks_healthz_local_upload_and_jobs_work_end_to_end() {
 			attempt_id: opened.attempt_id.clone(),
 			requirement_id: opened.requirement_id.clone(),
 			mime_type: "image/jpeg".into(),
-			byte_length: bytes.len() as i64,
+			byte_length: i64::try_from(bytes.len()).unwrap(),
 		},
 	)
 	.await
@@ -697,7 +698,7 @@ async fn partner_http_api_jwks_healthz_local_upload_and_jobs_work_end_to_end() {
 		identity.clone(),
 		None,
 		SubmitMediaProof {
-			attempt_id: opened.attempt_id,
+			attempt_id: opened.attempt_id.clone(),
 			requirement_id: opened.requirement_id,
 			reservation_id: plan.reservation_id,
 		},
@@ -711,6 +712,411 @@ async fn partner_http_api_jwks_healthz_local_upload_and_jobs_work_end_to_end() {
 		.await
 		.unwrap();
 	assert_eq!(verified_jobs, 1);
+
+	// Worker settled the attempt into `pending_review` (manual-review default without secrets).
+	let sys = db.system("check settled attempt");
+	let attempt_uuid: uuid::Uuid = opened.attempt_id.parse().unwrap();
+	let settled_attempt = verily_backend::Attempt::query()
+		.filter(|a| a.id.eq(leptoskit_db::Id::from_uuid(attempt_uuid)))
+		.first(&sys)
+		.await
+		.unwrap()
+		.unwrap();
+	assert_eq!(settled_attempt.status, "pending_review");
+
 	let summary = verily_backend::jobs::run_cleanup_sweeps(&db).await.unwrap();
 	assert_eq!(summary.expired_verification_requests, 0);
+}
+
+#[tokio::test]
+async fn production_backend_fails_closed_on_local_storage_and_unset_receipt_key() {
+	use base64::Engine as _;
+
+	let rewards = std::sync::Arc::new(verily_backend::rewards::mount().unwrap());
+	let verification = std::sync::Arc::new(verily_backend::verification::mount().unwrap());
+
+	// Empty env in production defaults to Local storage -> must fail closed!
+	let empty = std::collections::HashMap::new();
+	assert!(
+		verily_backend::Backend::from_env_map(
+			rewards.clone(),
+			verification.clone(),
+			None,
+			None,
+			&empty,
+			true,
+		)
+		.is_err()
+	);
+
+	// Valid B2 config in production succeeds; receipt_signer stays None without a real key.
+	let mut b2_env = std::collections::HashMap::new();
+	b2_env.insert("VERILY_EVIDENCE_STORAGE_MODE".into(), "b2".into());
+	b2_env.insert("VERILY_B2_BUCKET".into(), "verily-prod".into());
+	b2_env.insert("VERILY_B2_REGION".into(), "us-west-004".into());
+	b2_env.insert(
+		"VERILY_B2_ENDPOINT".into(),
+		"https://s3.us-west-004.backblazeb2.com".into(),
+	);
+	b2_env.insert("VERILY_B2_KEY_ID".into(), "key-id".into());
+	b2_env.insert("VERILY_B2_APPLICATION_KEY".into(), "app-key".into());
+	let prod_no_signer = verily_backend::Backend::from_env_map(
+		rewards.clone(),
+		verification.clone(),
+		None,
+		None,
+		&b2_env,
+		true,
+	)
+	.unwrap();
+	assert!(prod_no_signer.receipt_signer.is_none());
+
+	// Providing a real 32-byte base64url Ed25519 seed enables receipt signing.
+	let key_b64 = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode([0x2a_u8; 32]);
+	b2_env.insert("VERILY_RECEIPT_SIGNING_PRIVATE_KEY".into(), key_b64);
+	let prod_with_signer =
+		verily_backend::Backend::from_env_map(rewards, verification, None, None, &b2_env, true)
+			.unwrap();
+	assert!(prod_with_signer.receipt_signer.is_some());
+}
+
+#[tokio::test]
+async fn attempt_verification_stamps_partner_receipt_and_queues_webhook_and_retention_respects_appeals()
+ {
+	let _ = verily_app::ops::BACKEND;
+	let db = leptoskit_db::testing::sqlite().await;
+	let auth = Auth::builder(&db, Keys::single("test", [9; 32]));
+	let host = verily_backend::start(&db, auth, None, verily_backend::Options::new(&db)).unwrap();
+	let router = host.router.clone();
+
+	let creator_in = host
+		.auth
+		.dev_sign_in(
+			"partner-creator@example.com",
+			&leptoskit_auth::RequestInfo::default(),
+		)
+		.await
+		.unwrap()
+		.signed_in();
+	let creator_id = leptoskit_rpc::Identity::new(
+		leptoskit_auth::context(Some(creator_in.clone()))
+			.with(host.rewards.clone())
+			.with(host.backend.clone()),
+	)
+	.with_caller(creator_in.session.to_string());
+
+	let player_in = host
+		.auth
+		.dev_sign_in(
+			"partner-player@example.com",
+			&leptoskit_auth::RequestInfo::default(),
+		)
+		.await
+		.unwrap()
+		.signed_in();
+	let player_id = leptoskit_rpc::Identity::new(
+		leptoskit_auth::context(Some(player_in.clone()))
+			.with(host.rewards.clone())
+			.with(host.backend.clone()),
+	)
+	.with_caller(player_in.session.to_string());
+
+	// Creator registers a partner app + publishes a venue QR action.
+	let created_app = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		CreateApp {
+			name: "StepClub".into(),
+			slug: "stepclub".into(),
+			webhook_url: Some("https://stepclub.example/webhooks/verily".into()),
+		},
+	)
+	.await
+	.unwrap();
+
+	let saved = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		SaveAction {
+			draft: DraftInput {
+				id: None,
+				title: "Check in at kiosk".into(),
+				summary: "Scan the venue kiosk QR.".into(),
+				place_name: "Lobby".into(),
+				radius_meters: 50,
+				reward_amount: String::new(),
+				proofs: vec![ProofKind::VenueCode],
+				latitude: None,
+				longitude: None,
+			},
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		PublishAction {
+			action_id: saved.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+
+	// Partner creates a verification request via HTTP API.
+	let req_resp = router
+		.clone()
+		.oneshot(
+			Request::post("/api/v1/verification-requests")
+				.header(
+					header::AUTHORIZATION,
+					format!("Bearer {}", created_app.api_key_once),
+				)
+				.header(header::CONTENT_TYPE, "application/json")
+				.body(Body::from(
+					serde_json::json!({
+						"actionId": saved.id,
+						"externalSubject": "member_99"
+					})
+					.to_string(),
+				))
+				.unwrap(),
+		)
+		.await
+		.unwrap();
+	assert_eq!(req_resp.status(), StatusCode::OK);
+	let req_json = read_json(req_resp).await;
+	let request_id = req_json["id"].as_str().unwrap().to_owned();
+
+	// Player starts the verification request and completes the QR proof.
+	leptoskit_rpc::server::call_as(
+		&db,
+		player_id.clone(),
+		None,
+		verily_app::ops::StartVerificationRequest {
+			request_id: request_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+
+	let qr = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		CreateQrChallenge {
+			action_id: saved.id.clone(),
+			ttl_seconds: Some(300),
+		},
+	)
+	.await
+	.unwrap();
+
+	let opened = leptoskit_rpc::server::call_as(
+		&db,
+		player_id.clone(),
+		None,
+		BeginAttempt {
+			action_id: saved.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		player_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: opened.attempt_id.clone(),
+			requirement_id: opened.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		player_id.clone(),
+		None,
+		SubmitQrProof {
+			attempt_id: opened.attempt_id.clone(),
+			requirement_id: opened.requirement_id.clone(),
+			code: qr.code,
+		},
+	)
+	.await
+	.unwrap();
+
+	let outcome = leptoskit_rpc::server::call_as(
+		&db,
+		player_id.clone(),
+		None,
+		CompleteAttempt {
+			attempt_id: opened.attempt_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(outcome.status, AttemptStatus::Verified);
+
+	// Verification request was automatically stamped with a signed Ed25519 JWS receipt!
+	let receipt_resp = router
+		.clone()
+		.oneshot(
+			Request::get(format!(
+				"/api/v1/verification-requests/{request_id}/receipt"
+			))
+			.header(
+				header::AUTHORIZATION,
+				format!("Bearer {}", created_app.api_key_once),
+			)
+			.body(Body::empty())
+			.unwrap(),
+		)
+		.await
+		.unwrap();
+	assert_eq!(receipt_resp.status(), StatusCode::OK);
+	let receipt_json = read_json(receipt_resp).await;
+	assert_eq!(receipt_json["status"], "verified");
+	assert_eq!(
+		receipt_json["receipt"].as_str().unwrap().split('.').count(),
+		3
+	);
+
+	// Webhook delivery (`attempt.verified`) was automatically queued for StepClub!
+	let deliveries = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		verily_app::ops::ListAppDeliveries {
+			app_id: created_app.app.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(deliveries.len(), 1);
+	assert_eq!(deliveries[0].event_type, "attempt.verified");
+	assert_eq!(deliveries[0].status, "pending");
+
+	// Test pull-check sweep fails cleanly when an app has no webhook URL.
+	let no_hook_app = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		CreateApp {
+			name: "NoHook".into(),
+			slug: "nohook".into(),
+			webhook_url: None,
+		},
+	)
+	.await
+	.unwrap();
+	let sys = db.system("seed pull check and retention");
+	let app_uuid: uuid::Uuid = no_hook_app.app.id.parse().unwrap();
+	let attempt_uuid: uuid::Uuid = opened.attempt_id.parse().unwrap();
+	let pull = verily_backend::schema::NewVerilyAppPullCheckRow {
+		app_id: leptoskit_db::Id::from_uuid(app_uuid),
+		attempt_id: leptoskit_db::Id::from_uuid(attempt_uuid),
+		requirement_id: opened.requirement_id.clone(),
+		status: "pending".to_owned(),
+		attempts: 0,
+	}
+	.insert(&sys)
+	.await
+	.unwrap();
+	let checked = verily_backend::jobs::run_pull_check_sweep(&db, &host.backend)
+		.await
+		.unwrap();
+	assert_eq!(checked, 1);
+	let pull_after = verily_backend::schema::VerilyAppPullCheckRow::query()
+		.filter(|r| r.id.eq(pull.id))
+		.first(&sys)
+		.await
+		.unwrap()
+		.unwrap();
+	assert_eq!(pull_after.status, "failed");
+
+	// Test evidence retention sweep:
+	// - Day 3: still within 7-day window -> retained.
+	// - Day 10 with an open appeal: held under 30-day appeal policy -> retained.
+	// - Day 10 after appeal closes: purged from storage while sha256_digest stays!
+	let verily_verification::storage::EvidenceStore::Local(local) = &*host.backend.0.evidence_store
+	else {
+		panic!("expected local store in test");
+	};
+	let (vid, inspection) = local
+		.put_bytes("evidence/retention-test.jpg", "image/jpeg", b"old-bytes")
+		.unwrap();
+	let mut ev = verily_backend::Evidence::query()
+		.filter(|e| e.attempt_id.eq(leptoskit_db::Id::from_uuid(attempt_uuid)))
+		.first(&sys)
+		.await
+		.unwrap()
+		.unwrap();
+	ev.storage_path = Some("evidence/retention-test.jpg".to_owned());
+	ev.storage_version_id = Some(vid.clone());
+	ev.sha256_digest = Some(inspection.sha256_digest.clone());
+	ev.save(&sys).await.unwrap();
+
+	let day_3 = chrono::Utc::now() + chrono::Duration::days(3);
+	let day_10 = chrono::Utc::now() + chrono::Duration::days(10);
+
+	// Day 3 (within 7-day window) must NOT purge.
+	let purged_day_3 =
+		verily_backend::jobs::run_evidence_retention_sweep_at(&db, &host.backend, day_3)
+			.await
+			.unwrap();
+	assert_eq!(purged_day_3, 0);
+
+	// Open appeal holds evidence between 7 and 30 days.
+	let mut open_appeal = verily_backend::schema::NewAppeal {
+		attempt_id: leptoskit_db::Id::from_uuid(attempt_uuid),
+		participant_id: player_in.account,
+		reason: "Review retention hold test".to_owned(),
+		status: "open".to_owned(),
+	}
+	.insert(&sys)
+	.await
+	.unwrap();
+	let purged_while_appealed =
+		verily_backend::jobs::run_evidence_retention_sweep_at(&db, &host.backend, day_10)
+			.await
+			.unwrap();
+	assert_eq!(purged_while_appealed, 0);
+	assert!(
+		host.backend
+			.0
+			.evidence_store
+			.read_version_bytes("evidence/retention-test.jpg", &vid)
+			.await
+			.is_ok()
+	);
+
+	// Closing the appeal allows the 10-day-old storage object to be purged while digest stays!
+	open_appeal.status = "upheld".to_owned();
+	open_appeal.save(&sys).await.unwrap();
+	let purged_after_close =
+		verily_backend::jobs::run_evidence_retention_sweep_at(&db, &host.backend, day_10)
+			.await
+			.unwrap();
+	assert_eq!(purged_after_close, 1);
+	assert!(
+		host.backend
+			.0
+			.evidence_store
+			.read_version_bytes("evidence/retention-test.jpg", &vid)
+			.await
+			.is_err()
+	);
+	let ev_after = verily_backend::Evidence::query()
+		.filter(|e| e.id.eq(ev.id))
+		.first(&sys)
+		.await
+		.unwrap()
+		.unwrap();
+	assert!(ev_after.storage_path.is_none());
+	assert!(ev_after.storage_version_id.is_none());
+	assert_eq!(ev_after.sha256_digest, Some(inspection.sha256_digest));
 }

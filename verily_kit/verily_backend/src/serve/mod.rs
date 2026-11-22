@@ -57,10 +57,12 @@ use verily_verification::app_attest::VERILY_IOS_BUNDLE_ID;
 use verily_verification::key_attestation::AndroidKeyAttestationVerifier;
 use verily_verification::key_attestation::GoogleAttestationStatusSource;
 use verily_verification::key_attestation::KeyAttestationPolicy;
+use verily_verification::local_check::MediaPipeLocalCheckReplayer;
 use verily_verification::openrouter_http::ActionDraftGenerator;
 use verily_verification::play_integrity::GooglePlayIntegrityVerifier;
 use verily_verification::storage::EvidenceStore;
 use verily_verification::storage::StorageConfig;
+use verily_verification::storage::StorageError;
 
 pub use account::close_account;
 pub use account::create_wallet_link_challenge;
@@ -85,6 +87,9 @@ pub use attempts::begin_capture;
 pub use attempts::complete_attempt;
 pub use attempts::issue_spoken_challenge;
 pub use attempts::list_my_attempts;
+pub(crate) use attempts::notify_attempt_outcome;
+pub(crate) use attempts::record_decision;
+pub(crate) use attempts::settle;
 pub use attempts::submit_attestation;
 pub use attempts::submit_device_attestation;
 pub use attempts::submit_live_proof;
@@ -153,26 +158,28 @@ pub struct Backend {
 	pub db: Option<Db>,
 	/// Immutable private evidence storage (local dev store or Backblaze B2).
 	pub evidence_store: Arc<EvidenceStore>,
+	/// Server-side `MediaPipe` replayer for gesture/object/sound local checks.
+	pub local_check_replayer: Arc<MediaPipeLocalCheckReplayer>,
 	/// Apple App Attest verifier (pinned to Apple App Attestation Root CA).
 	pub app_attest: Option<Arc<AppAttestVerifier>>,
-	/// Apple DeviceCheck & App Attest receipt refresh HTTP client.
+	/// Apple `DeviceCheck` & App Attest receipt refresh HTTP client.
 	pub apple_device_client: Option<Arc<HttpAppleDeviceClient>>,
 	/// Google Play Integrity HTTP verifier.
 	pub play_integrity: Option<Arc<GooglePlayIntegrityVerifier>>,
 	/// Android Hardware Key Attestation verifier (pinned to Google roots).
 	pub android_attestation: Option<Arc<AndroidKeyAttestationVerifier>>,
-	/// OpenRouter plain-language action draft generator (optional, zero tools).
+	/// `OpenRouter` plain-language action draft generator (optional, zero tools).
 	pub draft_generator: Arc<ActionDraftGenerator>,
 	/// Ed25519 JWS signer for partner verification receipts (`/.well-known/jwks.json`).
-	pub receipt_signer: Arc<ReceiptSigner>,
+	/// `None` in production when `VERILY_RECEIPT_SIGNING_PRIVATE_KEY` is unset (never signs with dev keys).
+	pub receipt_signer: Option<Arc<ReceiptSigner>>,
 	/// HMAC salt for pseudonymizing accounts/devices in abuse-risk rows.
 	pub abuse_salt: Vec<u8>,
 }
 
 impl Backend {
-	/// Builds a [`Backend`] from the current process environment (Monosecret
-	/// resolved). Local development runs with zero cloud secrets: local
-	/// evidence storage, manual-review verifier, and deterministic dev receipt key.
+	/// Builds a [`Backend`] from the current process environment in development
+	/// mode (falls back to local storage and dev receipt signer when unset).
 	#[must_use]
 	pub fn from_env(
 		rewards: Arc<Rewards>,
@@ -181,19 +188,63 @@ impl Backend {
 		db: Option<Db>,
 	) -> Self {
 		let env_map: HashMap<String, String> = std::env::vars().collect();
+		Self::from_env_map(
+			rewards.clone(),
+			verification.clone(),
+			auth.clone(),
+			db.clone(),
+			&env_map,
+			false,
+		)
+		.unwrap_or_else(|_| Self::for_test(rewards, verification, auth, db))
+	}
+
+	/// Builds a [`Backend`] from the current process environment, failing closed
+	/// in production (`is_production = true`) if Backblaze B2 storage is missing
+	/// or misconfigured, and never falling back to a hardcoded dev receipt key.
+	pub fn from_env_checked(
+		rewards: Arc<Rewards>,
+		verification: Arc<MountedVerification>,
+		auth: Option<Auth>,
+		db: Option<Db>,
+		is_production: bool,
+	) -> Result<Self, StorageError> {
+		let env_map: HashMap<String, String> = std::env::vars().collect();
+		Self::from_env_map(rewards, verification, auth, db, &env_map, is_production)
+	}
+
+	/// Deterministic environment builder used by startup and tests.
+	#[allow(
+		clippy::too_many_lines,
+		reason = "initializes every optional platform verifier and storage client from env"
+	)]
+	pub fn from_env_map(
+		rewards: Arc<Rewards>,
+		verification: Arc<MountedVerification>,
+		auth: Option<Auth>,
+		db: Option<Db>,
+		env_map: &HashMap<String, String>,
+		is_production: bool,
+	) -> Result<Self, StorageError> {
 		let pairs: Vec<(&str, &str)> = env_map
 			.iter()
 			.map(|(k, v)| (k.as_str(), v.as_str()))
 			.collect();
 		let default_dir = std::env::temp_dir().join("verily-evidence");
-		let storage_cfg =
-			StorageConfig::from_env(pairs, default_dir.clone()).unwrap_or_else(|_| {
-				StorageConfig::Local {
-					root: default_dir,
-					public_origin: "http://127.0.0.1:8184".to_owned(),
-				}
-			});
+		let storage_cfg = StorageConfig::from_env(pairs, default_dir)?;
+		if is_production && matches!(storage_cfg, StorageConfig::Local { .. }) {
+			return Err(StorageError::Config(
+				"local evidence storage cannot be used in production",
+			));
+		}
 		let evidence_store = Arc::new(EvidenceStore::from_config(storage_cfg));
+
+		let model_cache_dir = env_map
+			.get("VERILY_LOCAL_CHECK_MODEL_CACHE")
+			.map(|s| s.trim())
+			.filter(|s| !s.is_empty())
+			.map_or_else(|| PathBuf::from("/app/local-check-models"), PathBuf::from);
+		let local_check_replayer = Arc::new(MediaPipeLocalCheckReplayer::new(model_cache_dir));
 
 		let app_attest_policy = env_map
 			.get("VERILY_APPLE_TEAM_ID")
@@ -232,7 +283,7 @@ impl Backend {
 			Some(Arc::new(HttpAppleDeviceClient::new(policy, key_id, pem)))
 		});
 
-		let android_policy = KeyAttestationPolicy::from_env(&env_map).ok();
+		let android_policy = KeyAttestationPolicy::from_env(env_map).ok();
 		let android_attestation = android_policy
 			.as_ref()
 			.filter(|p| !p.signing_certificate_digests.is_empty())
@@ -261,8 +312,9 @@ impl Backend {
 			.filter(|s| !s.is_empty());
 		let draft_generator = Arc::new(ActionDraftGenerator::new(openrouter_key));
 
-		let receipt_signer =
-			Arc::new(ReceiptSigner::from_env().unwrap_or_else(ReceiptSigner::development));
+		let receipt_signer = ReceiptSigner::from_env_map(env_map)
+			.or_else(|| (!is_production).then(ReceiptSigner::development))
+			.map(Arc::new);
 
 		let abuse_salt = env_map
 			.get("VERILY_ABUSE_RISK_SALT")
@@ -272,12 +324,13 @@ impl Backend {
 				|s| s.as_bytes().to_vec(),
 			);
 
-		Self {
+		Ok(Self {
 			rewards,
 			verification,
 			auth,
 			db,
 			evidence_store,
+			local_check_replayer,
 			app_attest,
 			apple_device_client,
 			play_integrity,
@@ -285,7 +338,7 @@ impl Backend {
 			draft_generator,
 			receipt_signer,
 			abuse_salt,
-		}
+		})
 	}
 
 	/// Builds an isolated [`Backend`] for in-memory tests using a unique temporary
@@ -298,6 +351,8 @@ impl Backend {
 		db: Option<Db>,
 	) -> Self {
 		let dir: PathBuf = std::env::temp_dir().join(format!("verily-test-{}", Uuid::new_v4()));
+		let model_dir: PathBuf =
+			std::env::temp_dir().join(format!("verily-models-{}", Uuid::new_v4()));
 		let evidence_store = Arc::new(EvidenceStore::from_config(StorageConfig::Local {
 			root: dir,
 			public_origin: "http://127.0.0.1:8184".to_owned(),
@@ -308,12 +363,13 @@ impl Backend {
 			auth,
 			db,
 			evidence_store,
+			local_check_replayer: Arc::new(MediaPipeLocalCheckReplayer::new(model_dir)),
 			app_attest: None,
 			apple_device_client: None,
 			play_integrity: None,
 			android_attestation: None,
 			draft_generator: Arc::new(ActionDraftGenerator::new(None)),
-			receipt_signer: Arc::new(ReceiptSigner::development()),
+			receipt_signer: Some(Arc::new(ReceiptSigner::development())),
 			abuse_salt: b"verily-test-abuse-salt".to_vec(),
 		}
 	}

@@ -1,11 +1,104 @@
 -- Complete LeptosKit port tables (SQLite dialect):
+-- app_backend_ops tables (account_closures, action_places + location, appeals,
+-- capture_windows, evidence_decisions, reviewers, spoken_challenges),
 -- upload reservations, verification jobs/votes, venue QR challenges,
 -- Apple App Attest keys/challenges, DeviceCheck audits, appeal resolutions,
 -- moderation cases/audits, abuse risk, AI usage & inference budget,
 -- Verily Apps, API keys, redirect URIs, links, confirmations, webhooks,
--- verification requests, and spatial point column on action_places.
+-- and verification requests.
 
-ALTER TABLE "action_places" ADD COLUMN "location" BLOB;
+CREATE TABLE IF NOT EXISTS "account_closures" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"account_id" BLOB NOT NULL CHECK (length("account_id") = 16),
+	"closed_at" TEXT NOT NULL,
+	CONSTRAINT "account_closures_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "account_closures_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "auth_accounts" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS "account_closures_account_id_key" ON "account_closures" ("account_id");
+
+CREATE TABLE IF NOT EXISTS "action_places" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"action_id" BLOB NOT NULL CHECK (length("action_id") = 16),
+	"place_name" TEXT NOT NULL CHECK (length("place_name") >= 1 AND length("place_name") <= 128),
+	"radius_meters" INTEGER NOT NULL CHECK ("radius_meters" >= 0 AND "radius_meters" <= 50000),
+	"latitude" REAL,
+	"longitude" REAL,
+	"location" BLOB,
+	"created_at" TEXT NOT NULL,
+	"updated_at" TEXT NOT NULL,
+	CONSTRAINT "action_places_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "action_places_action_id_fkey" FOREIGN KEY ("action_id") REFERENCES "actions" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS "action_places_action_id_key" ON "action_places" ("action_id");
+
+CREATE TABLE IF NOT EXISTS "appeals" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"attempt_id" BLOB NOT NULL CHECK (length("attempt_id") = 16),
+	"participant_id" BLOB NOT NULL CHECK (length("participant_id") = 16),
+	"reason" TEXT NOT NULL CHECK (length("reason") >= 1 AND length("reason") <= 1000),
+	"status" TEXT NOT NULL DEFAULT 'open' CHECK ("status" IN ('open', 'upheld', 'overturned')),
+	"created_at" TEXT NOT NULL,
+	CONSTRAINT "appeals_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "appeals_attempt_id_fkey" FOREIGN KEY ("attempt_id") REFERENCES "attempts" ("id") ON DELETE CASCADE,
+	CONSTRAINT "appeals_participant_id_fkey" FOREIGN KEY ("participant_id") REFERENCES "auth_accounts" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS "appeals_participant_id_idx" ON "appeals" ("participant_id");
+CREATE UNIQUE INDEX IF NOT EXISTS "appeals_attempt_id_key" ON "appeals" ("attempt_id");
+
+CREATE TABLE IF NOT EXISTS "capture_windows" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"attempt_id" BLOB NOT NULL CHECK (length("attempt_id") = 16),
+	"participant_id" BLOB NOT NULL CHECK (length("participant_id") = 16),
+	"requirement_id" TEXT NOT NULL CHECK (length("requirement_id") >= 1 AND length("requirement_id") <= 64),
+	"challenge" TEXT NOT NULL CHECK (length("challenge") >= 1 AND length("challenge") <= 64),
+	"opened_at" TEXT NOT NULL,
+	"expires_at" TEXT NOT NULL,
+	"consumed_at" TEXT,
+	"sha256_digest" TEXT CHECK (length("sha256_digest") <= 64),
+	CONSTRAINT "capture_windows_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "capture_windows_attempt_id_fkey" FOREIGN KEY ("attempt_id") REFERENCES "attempts" ("id") ON DELETE CASCADE,
+	CONSTRAINT "capture_windows_participant_id_fkey" FOREIGN KEY ("participant_id") REFERENCES "auth_accounts" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS "capture_windows_attempt_id_idx" ON "capture_windows" ("attempt_id");
+
+CREATE TABLE IF NOT EXISTS "evidence_decisions" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"evidence_id" BLOB NOT NULL CHECK (length("evidence_id") = 16),
+	"status" TEXT NOT NULL CHECK ("status" IN ('accepted', 'rejected', 'manual_review')),
+	"verifier_type" TEXT NOT NULL CHECK (length("verifier_type") >= 1 AND length("verifier_type") <= 64),
+	"reason_code" TEXT NOT NULL CHECK (length("reason_code") >= 1 AND length("reason_code") <= 64),
+	"summary" TEXT NOT NULL CHECK (length("summary") <= 500),
+	"reviewed_by" BLOB CHECK (length("reviewed_by") = 16),
+	"created_at" TEXT NOT NULL,
+	CONSTRAINT "evidence_decisions_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "evidence_decisions_evidence_id_fkey" FOREIGN KEY ("evidence_id") REFERENCES "evidence" ("id") ON DELETE CASCADE,
+	CONSTRAINT "evidence_decisions_reviewed_by_fkey" FOREIGN KEY ("reviewed_by") REFERENCES "auth_accounts" ("id") ON DELETE SET NULL
+) STRICT;
+CREATE INDEX IF NOT EXISTS "evidence_decisions_evidence_id_idx" ON "evidence_decisions" ("evidence_id");
+
+CREATE TABLE IF NOT EXISTS "reviewers" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"account_id" BLOB NOT NULL CHECK (length("account_id") = 16),
+	"granted_at" TEXT NOT NULL,
+	CONSTRAINT "reviewers_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "reviewers_account_id_fkey" FOREIGN KEY ("account_id") REFERENCES "auth_accounts" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE UNIQUE INDEX IF NOT EXISTS "reviewers_account_id_key" ON "reviewers" ("account_id");
+
+CREATE TABLE IF NOT EXISTS "spoken_challenges" (
+	"id" BLOB NOT NULL CHECK (length("id") = 16),
+	"attempt_id" BLOB NOT NULL CHECK (length("attempt_id") = 16),
+	"participant_id" BLOB NOT NULL CHECK (length("participant_id") = 16),
+	"requirement_id" TEXT NOT NULL CHECK (length("requirement_id") >= 1 AND length("requirement_id") <= 64),
+	"word" TEXT NOT NULL CHECK (length("word") >= 1 AND length("word") <= 32),
+	"issued_at" TEXT NOT NULL,
+	"expires_at" TEXT NOT NULL,
+	"bound_at" TEXT,
+	CONSTRAINT "spoken_challenges_pkey" PRIMARY KEY ("id"),
+	CONSTRAINT "spoken_challenges_attempt_id_fkey" FOREIGN KEY ("attempt_id") REFERENCES "attempts" ("id") ON DELETE CASCADE,
+	CONSTRAINT "spoken_challenges_participant_id_fkey" FOREIGN KEY ("participant_id") REFERENCES "auth_accounts" ("id") ON DELETE CASCADE
+) STRICT;
+CREATE INDEX IF NOT EXISTS "spoken_challenges_attempt_id_idx" ON "spoken_challenges" ("attempt_id");
 
 CREATE TABLE "evidence_upload_reservations" (
 	"id" BLOB NOT NULL CHECK (length("id") = 16),
