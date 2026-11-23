@@ -6,7 +6,7 @@ together. Evidence bytes are covered in [evidence storage](evidence-storage.md),
 model verification in [OpenRouter verification](openrouter-verification.md) and
 the [cloud verifier contract](video-verifier-contract.md), escrowed rewards in
 [reward escrow](reward-escrow.md), third-party Apps in [platform](platform.md),
-and the RPC surface in [Serverpod API](serverpod-api.md).
+and the RPC surface in [`verily_app::ops`](../verily_kit/verily_app/src/ops.rs).
 
 ## Actions are creator-owned
 
@@ -482,7 +482,7 @@ model provenance. Participants only ever see the product copy.
 secret), `openrouter`, or `cloud`. Partial configuration stops startup.
 
 These internal codes are for audit and review. The app only ever sees the
-public codes in [Serverpod API](serverpod-api.md#reason-codes-the-app-sees):
+public codes in [`verily_verification::reasons`](../verily_kit/verily_verification/src/reasons.rs):
 views map every internal code, including any reason an App sent, onto that
 set.
 
@@ -499,7 +499,7 @@ server with exactly the same model.
 | `sound`   | audio          | YAMNet, float32 v1 (4.1 MB)             | A reviewed subset of AudioSet sounds    |
 
 - **Rule.** `localCheck: {task, label, minScore, minFrames}` on the media rule:
-  a label from the allow-list (`LocalCheckModel` in `packages/verily_evidence`,
+  a label from the allow-list (`LocalCheckSpec` in `verily_shared` / `verily_verification`,
   shared by the server's validation and the app's editor), a minimum
   score of 0.3 to 0.99, and 1 to 30 matching frames or audio windows (one for a
   photo). Without a creator prompt the server writes the verification text

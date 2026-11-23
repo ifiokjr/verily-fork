@@ -12,7 +12,7 @@ name = "verily-attest"
 apple-module = "VerilyAttest"
 apple-type = "VerilyAttestPlugin"
 apple-frameworks = ["DeviceCheck", "Security"]
-android-type = "fun.verily.attest.VerilyAttestPlugin"
+android-type = "dev.verily.attest.VerilyAttestPlugin"
 android-context = true
 android-dependencies = ["com.google.android.play:integrity:1.4.0"]
 

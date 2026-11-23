@@ -1,4 +1,4 @@
-package fun.verily.attest
+package dev.verily.attest
 
 import android.content.Context
 import android.content.pm.PackageManager

@@ -54,6 +54,7 @@ use verily_app::ops::ReviewModerationCase;
 use verily_app::ops::SaveAction;
 use verily_app::ops::SubmitAppeal;
 use verily_app::ops::SubmitLiveProof;
+use verily_app::ops::SubmitLocationProof;
 use verily_app::ops::SubmitMediaProof;
 use verily_app::ops::SubmitQrProof;
 use verily_verification::asn1::hex_lower;
@@ -1119,4 +1120,409 @@ async fn attempt_verification_stamps_partner_receipt_and_queues_webhook_and_rete
 	assert!(ev_after.storage_path.is_none());
 	assert!(ev_after.storage_version_id.is_none());
 	assert_eq!(ev_after.sha256_digest, Some(inspection.sha256_digest));
+}
+
+async fn dev_identity(host: &verily_backend::Host, email: &str) -> leptoskit_rpc::Identity {
+	let signed = host
+		.auth
+		.dev_sign_in(email, &leptoskit_auth::RequestInfo::default())
+		.await
+		.unwrap()
+		.signed_in();
+	leptoskit_rpc::Identity::new(
+		leptoskit_auth::context(Some(signed.clone()))
+			.with(host.rewards.clone())
+			.with(host.backend.clone()),
+	)
+	.with_caller(signed.session.to_string())
+}
+
+#[tokio::test]
+async fn submit_location_proof_enforces_geofence_mock_and_travel_rules() {
+	let _ = verily_app::ops::BACKEND;
+	let db = leptoskit_db::testing::sqlite().await;
+	let auth = Auth::builder(&db, Keys::single("test", [11; 32]));
+	let host = verily_backend::start(&db, auth, None, verily_backend::Options::new(&db)).unwrap();
+
+	let creator_id = dev_identity(&host, "loc-creator@example.com").await;
+	let alice_id = dev_identity(&host, "loc-alice@example.com").await;
+	let bob_id = dev_identity(&host, "loc-bob@example.com").await;
+
+	// Action 1: Central London (51.5074, -0.1278), radius 150 m.
+	let london = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		SaveAction {
+			draft: DraftInput {
+				id: None,
+				title: "London check-in".into(),
+				summary: "Confirm your presence in Trafalgar Square.".into(),
+				place_name: "Trafalgar Square".into(),
+				radius_meters: 150,
+				reward_amount: String::new(),
+				proofs: vec![ProofKind::Presence],
+				latitude: Some(51.5074),
+				longitude: Some(-0.1278),
+			},
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		PublishAction {
+			action_id: london.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+
+	// Action 2: New York (40.7128, -74.0060), radius 150 m (for implausible travel check).
+	let nyc = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		SaveAction {
+			draft: DraftInput {
+				id: None,
+				title: "NYC check-in".into(),
+				summary: "Confirm your presence in Lower Manhattan.".into(),
+				place_name: "Lower Manhattan".into(),
+				radius_meters: 150,
+				reward_amount: String::new(),
+				proofs: vec![ProofKind::Presence],
+				latitude: Some(40.7128),
+				longitude: Some(-74.0060),
+			},
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		creator_id,
+		None,
+		PublishAction {
+			action_id: nyc.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+
+	let now_ms = chrono::Utc::now().timestamp_millis();
+
+	// 1. Mock location is rejected before consuming the capture window.
+	let alice_london = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		BeginAttempt {
+			action_id: london.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: alice_london.attempt_id.clone(),
+			requirement_id: alice_london.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	let mock_err = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		SubmitLocationProof {
+			attempt_id: alice_london.attempt_id.clone(),
+			requirement_id: alice_london.requirement_id.clone(),
+			latitude: 51.5074,
+			longitude: -0.1278,
+			accuracy_meters: 10.0,
+			captured_at_ms: now_ms,
+			is_mock: true,
+		},
+	)
+	.await
+	.unwrap_err();
+	assert!(
+		mock_err.to_string().contains("mockLocationRejected"),
+		"unexpected mock error: {mock_err}"
+	);
+
+	// 2. Real fix inside London geofence -> Verified!
+	let receipt = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		SubmitLocationProof {
+			attempt_id: alice_london.attempt_id.clone(),
+			requirement_id: alice_london.requirement_id.clone(),
+			latitude: 51.5075,
+			longitude: -0.1279,
+			accuracy_meters: 12.0,
+			captured_at_ms: now_ms,
+			is_mock: false,
+		},
+	)
+	.await
+	.unwrap();
+	assert!(receipt.stored);
+	let london_outcome = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		CompleteAttempt {
+			attempt_id: alice_london.attempt_id,
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(london_outcome.status, AttemptStatus::Verified);
+
+	// 3. Alice immediately checks in at NYC 5 seconds later (>5500 km in 5 s) -> held for PendingReview!
+	let alice_nyc = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		BeginAttempt { action_id: nyc.id },
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: alice_nyc.attempt_id.clone(),
+			requirement_id: alice_nyc.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		alice_id.clone(),
+		None,
+		SubmitLocationProof {
+			attempt_id: alice_nyc.attempt_id.clone(),
+			requirement_id: alice_nyc.requirement_id.clone(),
+			latitude: 40.7128,
+			longitude: -74.0060,
+			accuracy_meters: 10.0,
+			captured_at_ms: now_ms + 5_000,
+			is_mock: false,
+		},
+	)
+	.await
+	.unwrap();
+	let nyc_outcome = leptoskit_rpc::server::call_as(
+		&db,
+		alice_id,
+		None,
+		CompleteAttempt {
+			attempt_id: alice_nyc.attempt_id,
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(nyc_outcome.status, AttemptStatus::PendingReview);
+
+	// 4. Bob checks in 2 km outside London geofence -> Rejected!
+	let bob_london = leptoskit_rpc::server::call_as(
+		&db,
+		bob_id.clone(),
+		None,
+		BeginAttempt {
+			action_id: london.id,
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		bob_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: bob_london.attempt_id.clone(),
+			requirement_id: bob_london.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		bob_id.clone(),
+		None,
+		SubmitLocationProof {
+			attempt_id: bob_london.attempt_id.clone(),
+			requirement_id: bob_london.requirement_id.clone(),
+			latitude: 51.5250,
+			longitude: -0.1278,
+			accuracy_meters: 10.0,
+			captured_at_ms: now_ms,
+			is_mock: false,
+		},
+	)
+	.await
+	.unwrap();
+	let bob_outcome = leptoskit_rpc::server::call_as(
+		&db,
+		bob_id,
+		None,
+		CompleteAttempt {
+			attempt_id: bob_london.attempt_id,
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(bob_outcome.status, AttemptStatus::Rejected);
+}
+
+#[tokio::test]
+async fn venue_code_is_single_use_across_participants_with_fresh_windows() {
+	let _ = verily_app::ops::BACKEND;
+	let db = leptoskit_db::testing::sqlite().await;
+	let auth = Auth::builder(&db, Keys::single("test", [12; 32]));
+	let host = verily_backend::start(&db, auth, None, verily_backend::Options::new(&db)).unwrap();
+
+	let creator_id = dev_identity(&host, "qr-creator@example.com").await;
+	let first_id = dev_identity(&host, "qr-first@example.com").await;
+	let second_id = dev_identity(&host, "qr-second@example.com").await;
+
+	let saved = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		SaveAction {
+			draft: DraftInput {
+				id: None,
+				title: "Coffee counter scan".into(),
+				summary: "Scan the rotating venue QR at the counter.".into(),
+				place_name: "Corner Coffee".into(),
+				radius_meters: 0,
+				reward_amount: String::new(),
+				proofs: vec![ProofKind::VenueCode],
+				latitude: None,
+				longitude: None,
+			},
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		creator_id.clone(),
+		None,
+		PublishAction {
+			action_id: saved.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+
+	let qr = leptoskit_rpc::server::call_as(
+		&db,
+		creator_id,
+		None,
+		CreateQrChallenge {
+			action_id: saved.id.clone(),
+			ttl_seconds: Some(600),
+		},
+	)
+	.await
+	.unwrap();
+
+	// First participant opens an attempt + capture window and redeems the code.
+	let first_attempt = leptoskit_rpc::server::call_as(
+		&db,
+		first_id.clone(),
+		None,
+		BeginAttempt {
+			action_id: saved.id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		first_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: first_attempt.attempt_id.clone(),
+			requirement_id: first_attempt.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	let redeemed = leptoskit_rpc::server::call_as(
+		&db,
+		first_id.clone(),
+		None,
+		SubmitQrProof {
+			attempt_id: first_attempt.attempt_id.clone(),
+			requirement_id: first_attempt.requirement_id.clone(),
+			code: qr.code.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	assert!(redeemed.stored);
+	let first_outcome = leptoskit_rpc::server::call_as(
+		&db,
+		first_id,
+		None,
+		CompleteAttempt {
+			attempt_id: first_attempt.attempt_id,
+		},
+	)
+	.await
+	.unwrap();
+	assert_eq!(first_outcome.status, AttemptStatus::Verified);
+
+	// Second participant opens a fresh attempt + fresh capture window and tries to replay the code.
+	let second_attempt = leptoskit_rpc::server::call_as(
+		&db,
+		second_id.clone(),
+		None,
+		BeginAttempt {
+			action_id: saved.id,
+		},
+	)
+	.await
+	.unwrap();
+	leptoskit_rpc::server::call_as(
+		&db,
+		second_id.clone(),
+		None,
+		BeginCapture {
+			attempt_id: second_attempt.attempt_id.clone(),
+			requirement_id: second_attempt.requirement_id.clone(),
+		},
+	)
+	.await
+	.unwrap();
+	let replay_err = leptoskit_rpc::server::call_as(
+		&db,
+		second_id,
+		None,
+		SubmitQrProof {
+			attempt_id: second_attempt.attempt_id,
+			requirement_id: second_attempt.requirement_id,
+			code: qr.code,
+		},
+	)
+	.await
+	.unwrap_err();
+	assert!(
+		replay_err.to_string().contains("venueCodeUsed"),
+		"expected venueCodeUsed on replay, got: {replay_err}"
+	);
 }

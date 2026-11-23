@@ -778,7 +778,7 @@ fn place_point(place: Option<&ActionPlace>) -> Option<(f64, f64)> {
 }
 
 /// Great-circle distance in metres on a sphere the size of the Earth.
-fn haversine_meters(from: (f64, f64), to: (f64, f64)) -> f64 {
+pub(super) fn haversine_meters(from: (f64, f64), to: (f64, f64)) -> f64 {
 	const EARTH_RADIUS_METERS: f64 = 6_371_008.8;
 	let (lat1, lon1) = (from.0.to_radians(), from.1.to_radians());
 	let (lat2, lon2) = (to.0.to_radians(), to.1.to_radians());

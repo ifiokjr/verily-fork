@@ -41,7 +41,7 @@ let
   kitPort = "8184";
   sitePort = "8183";
   postgresPort = 8191;
-  leptoskitRev = "909debbe7e0d94a95442d6a8ba10ebea9cdbf58a";
+  leptoskitRev = "d8b3dbe2f6c6388dc09aa1584aa1cb19416cf46a";
   devenvGitHook =
     name: script: arguments:
     pkgs.writeShellScript name ''
@@ -100,6 +100,12 @@ in
       coreutils
       swift-format
       swiftlint
+    ]
+    # The kit's Linux host enables LeptosKit's gtk feature, so `lk lint`
+    # builds glib-sys. pkg-config only sees packages in this shell.
+    ++ lib.optionals stdenv.isLinux [
+      gtk4
+      pkg-config
     ];
 
   dotenv.disableHint = true;
@@ -114,7 +120,7 @@ in
   services = {
     postgres = {
       enable = !isCI;
-      package = pkgs.postgresql_16;
+      package = pkgs.postgresql_18;
       # PostGIS backs the geography columns and GiST indexes for action
       # places and location proof.
       extensions = exts: [ exts.postgis ];

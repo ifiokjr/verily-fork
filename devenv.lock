@@ -117,27 +117,6 @@
         "type": "github"
       }
     },
-    "ifiokjr-nixpkgs-serverpod": {
-      "inputs": {
-        "nixpkgs": [
-          "nixpkgs"
-        ]
-      },
-      "locked": {
-        "lastModified": 1794148925,
-        "narHash": "sha256-GHN/RyGMKxmqLwM5z0v4uaazvCK4Yxleg4VhKqnWHXI=",
-        "owner": "ifiokjr",
-        "repo": "nixpkgs",
-        "rev": "6916068e520396144ebab9b83fb4ab81ddc3f879",
-        "type": "github"
-      },
-      "original": {
-        "owner": "ifiokjr",
-        "repo": "nixpkgs",
-        "rev": "6916068e520396144ebab9b83fb4ab81ddc3f879",
-        "type": "github"
-      }
-    },
     "nixpkgs": {
       "locked": {
         "lastModified": 1793977579,
@@ -161,7 +140,6 @@
         "ifiokjr-nixpkgs": "ifiokjr-nixpkgs",
         "ifiokjr-nixpkgs-monochange": "ifiokjr-nixpkgs-monochange",
         "ifiokjr-nixpkgs-pina": "ifiokjr-nixpkgs-pina",
-        "ifiokjr-nixpkgs-serverpod": "ifiokjr-nixpkgs-serverpod",
         "nixpkgs": "nixpkgs",
         "rust-overlay": "rust-overlay"
       }

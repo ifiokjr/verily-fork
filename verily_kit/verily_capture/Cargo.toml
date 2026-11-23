@@ -17,8 +17,9 @@ apple-usage-descriptions = [
   "NSCameraUsageDescription",
   "NSMicrophoneUsageDescription",
   "NSLocationWhenInUseUsageDescription",
+  "NSMotionUsageDescription",
 ]
-android-type = "fun.verily.capture.VerilyCapturePlugin"
+android-type = "dev.verily.capture.VerilyCapturePlugin"
 android-context = true
 android-permissions = [
   "android.permission.CAMERA",

@@ -1,4 +1,4 @@
-package fun.verily.capture
+package dev.verily.capture
 
 import android.Manifest
 import android.content.Context

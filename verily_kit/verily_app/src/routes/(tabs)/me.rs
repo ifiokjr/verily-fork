@@ -334,7 +334,8 @@ fn appeal_form(
 			<chrome::Quiet label=l10n.me_appeal() seed=201 on_press=move || open.set(true) />
 		};
 	}
-	let disabled = submit.is_pending() || !crate::model::valid_appeal_reason(&reason.get());
+	let pending = submit.is_pending();
+	let disabled = pending || !crate::model::valid_appeal_reason(&reason.get());
 	view! {
 		<View class=theme::STACK>
 			<chrome::Title text=l10n.me_appeal_title() />
@@ -344,7 +345,7 @@ fn appeal_form(
 				placeholder=l10n.me_appeal_reason_hint()
 				value=reason.get()
 				seed=205
-				disabled=submit.is_pending()
+				disabled=pending
 				on_change=move |next: &str| {
 					if !submit.is_pending() {
 						reason.set(next.to_owned());
@@ -370,7 +371,7 @@ fn appeal_form(
 				<chrome::Quiet
 					label=l10n.me_appeal_cancel()
 					seed=211
-					disabled=submit.is_pending()
+					disabled=pending
 					on_press=move || open.set(false)
 				/>
 			</View>
@@ -431,6 +432,7 @@ mod tests {
 		loop {
 			tester.pump();
 			if !tester.find_all(&Finder::text(text)).is_empty() {
+				tester.pump();
 				return;
 			}
 			assert!(

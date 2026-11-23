@@ -731,6 +731,233 @@ pub async fn submit_qr_proof(
 	})
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct StoredLocationObservation {
+	latitude: f64,
+	longitude: f64,
+	accuracy_meters: f64,
+	captured_at_ms: i64,
+}
+
+/// Evaluates a live device GPS fix against the action's geofence, accuracy,
+/// freshness, and implausible-travel rules via [`verily_verification::location::decide`].
+///
+/// Coordinates stay private on the server (`capture_manifest` is `#[db(private)]`)
+/// and mock/simulated fixes are rejected unconditionally.
+#[allow(
+	clippy::too_many_arguments,
+	clippy::too_many_lines,
+	reason = "linear transactional verification of location fix, capture window, geofence, and travel plausibility"
+)]
+pub async fn submit_location_proof(
+	cx: &rpc::MutationCx,
+	attempt_id: String,
+	requirement_id: String,
+	latitude: f64,
+	longitude: f64,
+	accuracy_meters: f64,
+	captured_at_ms: i64,
+	is_mock: bool,
+) -> rpc::Result<ProofReceipt> {
+	let participant = me(cx.context())?;
+	require_active(cx.tx(), participant).await?;
+	let (attempt, action, requirement) =
+		open_attempt(cx.tx(), participant, &attempt_id, &requirement_id).await?;
+	if requirement.kind != ActionRequirementKind::Location {
+		return Err(rpc::Error::invalid("invalidRequest"));
+	}
+	if is_mock {
+		return Err(rpc::Error::invalid("mockLocationRejected"));
+	}
+	if !latitude.is_finite()
+		|| !longitude.is_finite()
+		|| !(-90.0..=90.0).contains(&latitude)
+		|| !(-180.0..=180.0).contains(&longitude)
+		|| !accuracy_meters.is_finite()
+		|| accuracy_meters < 0.0
+	{
+		return Err(rpc::Error::invalid("invalidLocation"));
+	}
+	let captured_at = DateTime::from_timestamp_millis(captured_at_ms)
+		.ok_or_else(|| rpc::Error::invalid("invalidLocation"))?;
+
+	let canonical = format!("{latitude:.6},{longitude:.6},{accuracy_meters:.2},{captured_at_ms}");
+	let digest = hex_lower(&Sha256::digest(canonical.as_bytes()));
+
+	if let Some(existing) = evidence_for(cx.tx(), &attempt, &requirement).await? {
+		return if existing.sha256_digest.as_deref() == Some(digest.as_str()) {
+			Ok(ProofReceipt {
+				digest_hex: digest,
+				stored: true,
+			})
+		} else {
+			Err(rpc::Error::conflict("proofAlreadySubmitted"))
+		};
+	}
+
+	let now = Utc::now();
+	let requirement_key = requirement.id.to_string();
+	let mut window = CaptureWindowRow::query()
+		.filter(|row| {
+			row.attempt_id.eq(attempt.id)
+				& row.requirement_id.eq(requirement_key.clone())
+				& row.consumed_at.is_null()
+				& row.expires_at.gt(now)
+		})
+		.order_by(|row| row.opened_at.desc())
+		.first(cx.tx())
+		.await
+		.map_err(db)?
+		.ok_or_else(|| rpc::Error::invalid("captureWindowClosed"))?;
+
+	window.consumed_at = Some(now);
+	window.sha256_digest = Some(digest.clone());
+	window.save(cx.tx()).await.map_err(db)?;
+
+	let place = super::catalogue::place_for(cx.tx(), action.id).await?;
+	let target_coords = requirement
+		.latitude
+		.zip(requirement.longitude)
+		.or_else(|| place.as_ref().and_then(|p| p.latitude.zip(p.longitude)));
+	let radius_meters = requirement.radius_meters.or_else(|| {
+		place.as_ref().and_then(|p| {
+			(p.radius_meters > 0)
+				.then(|| u32::try_from(p.radius_meters).ok().map(f64::from))
+				.flatten()
+		})
+	});
+	let max_accuracy_meters = requirement.max_accuracy_meters.unwrap_or(100.0);
+
+	let previous =
+		previous_location_observation(cx.tx(), participant, (latitude, longitude)).await?;
+
+	let manifest_json = serde_json::to_string(&StoredLocationObservation {
+		latitude,
+		longitude,
+		accuracy_meters,
+		captured_at_ms,
+	})
+	.ok();
+
+	let evidence = NewEvidence {
+		attempt_id: attempt.id,
+		requirement_key,
+		kind: name(&requirement.kind),
+		storage_path: None,
+		storage_version_id: None,
+		mime_type: Some("application/json".to_owned()),
+		sha256_digest: Some(digest.clone()),
+		byte_length: manifest_json
+			.as_ref()
+			.and_then(|s| i64::try_from(s.len()).ok()),
+		provenance_level: "basic".to_owned(),
+		capture_manifest: manifest_json,
+		capture_signature: None,
+		capture_public_key: None,
+		capture_key_id: None,
+		capture_key_storage: None,
+		captured_at,
+	}
+	.insert(cx.tx())
+	.await
+	.map_err(db)?;
+
+	match (target_coords, radius_meters) {
+		(Some(target), Some(radius)) if radius > 0.0 => {
+			let distance_meters = super::catalogue::haversine_meters((latitude, longitude), target);
+			let obs = verily_verification::location::Observation {
+				accuracy_meters,
+				captured_at,
+			};
+			let decision = verily_verification::location::decide(
+				verily_verification::location::LocationPolicy::default(),
+				now,
+				obs,
+				max_accuracy_meters,
+				distance_meters,
+				radius,
+				previous,
+			)
+			.map_err(|_| rpc::Error::invalid("invalidLocation"))?;
+			record_decision(
+				cx.tx(),
+				evidence.id,
+				decision.status,
+				decision.verifier_type,
+				decision.reason_code,
+				None,
+				decision.summary,
+			)
+			.await?;
+		}
+		_ => {
+			record_decision(
+				cx.tx(),
+				evidence.id,
+				EvidenceDecisionStatus::ManualReview,
+				"geofence",
+				"location_target_missing",
+				None,
+				"A person will check this location proof.",
+			)
+			.await?;
+		}
+	}
+
+	Ok(ProofReceipt {
+		digest_hex: digest,
+		stored: true,
+	})
+}
+
+async fn previous_location_observation(
+	connection: &impl Read,
+	participant: Id<AuthAccount>,
+	current_coords: (f64, f64),
+) -> Result<Option<verily_verification::location::PreviousObservation>, rpc::Error> {
+	let attempts = Attempt::query()
+		.filter(|row| row.participant_id.eq(participant))
+		.order_by(|row| row.started_at.desc())
+		.limit(25)
+		.all(connection)
+		.await
+		.map_err(db)?;
+	let location_kind = name(&ActionRequirementKind::Location);
+	let mut latest: Option<(DateTime<Utc>, StoredLocationObservation)> = None;
+	for attempt in attempts {
+		let rows = Evidence::query()
+			.filter(|row| row.attempt_id.eq(attempt.id) & row.kind.eq(location_kind.clone()))
+			.order_by(|row| row.captured_at.desc())
+			.limit(5)
+			.all(connection)
+			.await
+			.map_err(db)?;
+		for row in rows {
+			let Some(raw) = row.capture_manifest.as_deref() else {
+				continue;
+			};
+			let Ok(parsed) = serde_json::from_str::<StoredLocationObservation>(raw) else {
+				continue;
+			};
+			let Some(ts) = DateTime::from_timestamp_millis(parsed.captured_at_ms) else {
+				continue;
+			};
+			if latest.as_ref().is_none_or(|(prev_ts, _)| ts > *prev_ts) {
+				latest = Some((ts, parsed));
+			}
+		}
+	}
+	Ok(latest.map(|(captured_at, prev)| {
+		let distance_meters =
+			super::catalogue::haversine_meters((prev.latitude, prev.longitude), current_coords);
+		verily_verification::location::PreviousObservation {
+			distance_meters,
+			accuracy_meters: prev.accuracy_meters,
+			captured_at,
+		}
+	}))
+}
+
 /// Cryptographically verifies Android Key Attestation + Play Integrity OR
 /// registered Apple App Attest assertions bound to an already-pinned evidence digest.
 ///

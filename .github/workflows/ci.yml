@@ -33,6 +33,27 @@ jobs:
         working-directory: verily_kit
         run: cargo check --bin verily-kit --locked
 
+      - name: Clippy verily_kit crates and platform features
+        working-directory: verily_kit
+        run: |
+          cargo clippy \
+            -p verily_kit \
+            -p verily_shared \
+            -p verily_api \
+            -p verily_ink \
+            -p verily_site \
+            -p verily_attest \
+            -p verily_capture \
+            -p verily_verification \
+            -p verily_rewards \
+            -p verily_backend \
+            -p verily_app \
+            --all-targets --locked -- -D warnings
+          cargo clippy -p verily_app --features csr --locked -- -D warnings
+          cargo clippy -p verily_app --features native --locked -- -D warnings
+          cargo clippy -p verily_app --features android --locked -- -D warnings
+          cargo clippy -p verily_app --features ios --locked -- -D warnings
+
       - name: Run verily_kit workspace tests
         working-directory: verily_kit
         run: |

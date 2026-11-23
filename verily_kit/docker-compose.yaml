@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: imresamu/postgis:16-3.6
+    image: imresamu/postgis:18-3.6
     ports:
       - "127.0.0.1:${VERILY_POSTGRES_PORT:-8191}:5432"
     environment:
@@ -8,7 +8,7 @@ services:
       POSTGRES_DB: verily
       POSTGRES_HOST_AUTH_METHOD: trust
     volumes:
-      - verily_data:/var/lib/postgresql/data
+      - verily_data:/var/lib/postgresql
       - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -d verily"]

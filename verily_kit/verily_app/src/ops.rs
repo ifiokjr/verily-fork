@@ -259,6 +259,32 @@ pub async fn submit_motion_proof(
 	verily_backend::serve::submit_motion_proof(cx, attempt_id, requirement_id, trace_json).await
 }
 
+/// Evaluates a live device location fix against the action's geofence and travel rules.
+#[allow(clippy::too_many_arguments)]
+#[leptoskit::rpc::mutation(service = "verily-backend", crate = "leptoskit::rpc")]
+pub async fn submit_location_proof(
+	cx: &leptoskit::rpc::MutationCx,
+	attempt_id: String,
+	requirement_id: String,
+	latitude: f64,
+	longitude: f64,
+	accuracy_meters: f64,
+	captured_at_ms: i64,
+	is_mock: bool,
+) -> leptoskit::rpc::Result<ProofReceipt> {
+	verily_backend::serve::submit_location_proof(
+		cx,
+		attempt_id,
+		requirement_id,
+		latitude,
+		longitude,
+		accuracy_meters,
+		captured_at_ms,
+		is_mock,
+	)
+	.await
+}
+
 /// Redeems a rotating creator-issued venue QR challenge once.
 #[leptoskit::rpc::mutation(service = "verily-backend", crate = "leptoskit::rpc")]
 pub async fn submit_qr_proof(

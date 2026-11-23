@@ -93,6 +93,7 @@ pub(crate) use attempts::settle;
 pub use attempts::submit_attestation;
 pub use attempts::submit_device_attestation;
 pub use attempts::submit_live_proof;
+pub use attempts::submit_location_proof;
 pub use attempts::submit_media_proof;
 pub use attempts::submit_motion_proof;
 pub use attempts::submit_qr_proof;
