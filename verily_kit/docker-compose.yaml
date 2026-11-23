@@ -1,6 +1,8 @@
 services:
   postgres:
-    image: imresamu/postgis:18-3.6
+    # Official PostGIS 3.7 on PostgreSQL 19 (publishes linux/amd64 manifests).
+    image: postgis/postgis:19-3.7
+    platform: linux/amd64
     ports:
       - "127.0.0.1:${VERILY_POSTGRES_PORT:-8191}:5432"
     environment:

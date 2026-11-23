@@ -120,7 +120,7 @@ in
   services = {
     postgres = {
       enable = !isCI;
-      package = pkgs.postgresql_18;
+      package = pkgs.postgresql_19;
       # PostGIS backs the geography columns and GiST indexes for action
       # places and location proof.
       extensions = exts: [ exts.postgis ];

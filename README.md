@@ -28,7 +28,7 @@ the LeptosKit architecture work.
 | Piece        | Choice                                                                                                  |
 | ------------ | ------------------------------------------------------------------------------------------------------- |
 | App & Web    | [LeptosKit](https://github.com/leptoskit/leptoskit) (`verily_kit/verily_app`), `leptoskit_skribble`     |
-| Server       | LeptosKit Axum + RPC + Auth + Jobs (`verily_kit/verily_backend`), PostgreSQL 18 + PostGIS               |
+| Server       | LeptosKit Axum + RPC + Auth + Jobs (`verily_kit/verily_backend`), PostgreSQL 19 + PostGIS 3.7           |
 | MediaPipe    | [`leptoskit/mediapipe`](https://github.com/leptoskit/mediapipe) (on-device HUD + server replay)         |
 | Evidence     | Private Backblaze B2 (S3v4), version-pinned, short retention                                            |
 | Verification | Rules + Key Attestation / App Attest / Play Integrity + OpenRouter council + manual review              |
