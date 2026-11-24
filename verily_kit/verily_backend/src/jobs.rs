@@ -332,11 +332,12 @@ pub async fn run_evidence_verification_sweep(
 			&& let (Some(storage_path), Some(version_id)) = (
 				evidence.storage_path.as_deref(),
 				evidence.storage_version_id.as_deref(),
-			) && let Ok((bytes, mime_type)) = backend
-			.0
-			.evidence_store
-			.read_version_bytes(storage_path, version_id)
-			.await
+			)
+			&& let Ok((bytes, mime_type)) = backend
+				.0
+				.evidence_store
+				.read_version_bytes(storage_path, version_id)
+				.await
 		{
 			let replayer = backend.0.local_check_replayer.clone();
 			let replay = tokio::task::spawn_blocking(move || {

@@ -793,7 +793,8 @@ impl AndroidKeyAttestationVerifier {
 		};
 		if hardware.origin != Some(keymint_tag::ORIGIN_GENERATED)
 			|| hardware.algorithm != Some(keymint_tag::ALGORITHM_EC)
-			|| !p256 || !can_sign
+			|| !p256
+			|| !can_sign
 		{
 			return KeyAttestationVerdict::untrusted(reason::KEY_INVALID, Some(leaf_pub));
 		}

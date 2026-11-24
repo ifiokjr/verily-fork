@@ -696,11 +696,13 @@ impl<'a> Body<'a> {
 		let arms_up = ((y(PoseJoint::LeftShoulder) + y(PoseJoint::RightShoulder)
 			- y(PoseJoint::LeftWrist)
 			- y(PoseJoint::RightWrist))
-			/ 2.0 / height
-			+ 0.4) / 0.9;
-		let feet_apart = ((x(PoseJoint::LeftAnkle) - x(PoseJoint::RightAnkle)).abs()
-			/ shoulder_width
-			- 1.0) / 0.9;
+			/ 2.0
+			/ height
+			+ 0.4)
+			/ 0.9;
+		let feet_apart =
+			((x(PoseJoint::LeftAnkle) - x(PoseJoint::RightAnkle)).abs() / shoulder_width - 1.0)
+				/ 0.9;
 		Some(arms_up.min(feet_apart))
 	}
 

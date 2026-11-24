@@ -9,7 +9,7 @@
 # bundle (`dist/index.html`, `dist/pkg/`, `dist/assets/`), plus the static
 # landing page (`dist/site/`).
 
-ARG LEPTOSKIT_REV=d8b3dbe2f6c6388dc09aa1584aa1cb19416cf46a
+ARG LEPTOSKIT_REV=4f52896af397cc38834ac9d937a04b02bc5c5bf4
 ARG BINARYEN_VERSION=132
 ARG ESBUILD_VERSION=0.27.2
 ARG ESBUILD_SHA256=4ac0a36a8573ef6b612263661e7c77343a38789485344e1875cf33a498292310

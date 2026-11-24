@@ -386,7 +386,8 @@ pub async fn submit_and_confirm_release<T: Transport>(
 					commitment: Some(Commitment::Confirmed),
 					..ReadConfig::default()
 				})))
-				.await && height > latest.last_valid_block_height
+				.await
+				&& height > latest.last_valid_block_height
 			{
 				if let Ok(hist) = client
 					.call(SignatureStatuses(
@@ -395,7 +396,8 @@ pub async fn submit_and_confirm_release<T: Transport>(
 							search_transaction_history: Some(true),
 						}),
 					))
-					.await && let Some(Some(status)) = hist.value.first()
+					.await
+					&& let Some(Some(status)) = hist.value.first()
 					&& status.err.is_none()
 					&& matches!(
 						status.confirmation_status,
